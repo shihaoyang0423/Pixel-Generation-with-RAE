@@ -86,7 +86,7 @@ def joint_training_losses(model, x1_pix, x1_rae, transport_pix, transport_rae, m
     t_pix, x0_pix, _ = transport_pix.sample(x1_pix) 
     
     # 2. Sample t and noise for RAE stream (Decoupled t)
-    t_rae, x0_rae, _ = transport_rae.sample(x1_rae)
+    t_rae, x0_rae, _ = transport_rae.sample(x1_rae, t_pix) # Same timestep
     
     # 3. Plan (Interpolate)
     # Pixel Plan
@@ -99,7 +99,7 @@ def joint_training_losses(model, x1_pix, x1_rae, transport_pix, transport_rae, m
     # PixelDDT expects (x_pix, x_rae, t_pix, t_rae, y)
     model_output_pix, model_output_rae = model(
         x_pix=xt_pix, 
-        x_rae=xt_rae, 
+        x_rae=xt_rae,
         t_pix=t_pix, 
         t_rae=t_rae, 
         **model_kwargs
@@ -242,6 +242,17 @@ def joint_sample_ode(
     # Integrator expects t0, t1.
     # If we pass time_dist_shift=1.0 to `ode`, it generates linear `self.t` from [t0, t1].
     # Which is exactly what we want 's' to be.
+
+    if sampler_type == "naive":
+        return joint_sample_ode_naive(
+            z_pix, 
+            z_rae, 
+            model_fn, 
+            transport_pix, 
+            transport_rae,
+            num_steps=num_steps, 
+            **kwargs
+        )
     
     _ode = ode(
         drift=joint_drift_fn,
@@ -261,17 +272,89 @@ def joint_sample_ode(
     # ode.sample returns a list of samples (trajectory). We take the last one.
     samples = _ode.sample(x_init, model_fn, **kwargs)
     
-    # samples is a list of tuples? Check integrators.py
-    # "samples = odeint(..., x, ...)"
-    # torchdiffeq returns tensor of shape (T, B, ...) if input is tensor.
-    # If input is tuple, it returns tuple of tensors (each (T, B, ...)).
-    
     samples_pix_hist, samples_rae_hist = samples
     
     x_pix_final = samples_pix_hist[-1]
     x_rae_final = samples_rae_hist[-1]
         
     return x_pix_final, x_rae_final
+
+def joint_sample_ode_naive(
+    z_pix, 
+    z_rae, 
+    model_fn, 
+    transport_pix, 
+    transport_rae,
+    num_steps=50, 
+    **kwargs
+):
+    """
+    Naive Euler ODE solver for coupled generation with support for different transport schedules.
+    Guarantees correctness by explicit stepping without complex ODE integrators.
+    Now correctly handles non-linear time schedules (time_dist_shift).
+    """
+    B = z_pix.shape[0]
+    device = z_pix.device
+    
+    # helper for drift
+    def compute_ode_drift(transport, x, t, model_out):
+        if transport.model_type == ModelType.VELOCITY:
+            return model_out
+        # default to returning model out if unknown (assuming velocity matching)
+        return model_out
+        
+    # 1. Define shared linear time grid 's'
+    # Use transport_pix for the canonical 's' range.
+    t0, t1 = transport_pix.check_interval(transport_pix.train_eps, transport_pix.sample_eps, eval=True)
+    ss = torch.linspace(t0, t1, num_steps + 1, device=device)
+    
+    x_pix = z_pix.detach().clone()
+    x_rae = z_rae.detach().clone()
+    
+    # Helper: Map linear s -> t(s) with shift
+    def get_t(s, shift):
+        return shift * s / (1 + (shift - 1) * s)
+    
+    # Helper: Derivative dt/ds
+    def get_dt_ds(s, shift):
+        denom = 1 + (shift - 1) * s
+        return shift / (denom ** 2)
+
+    # Euler Integration Loop
+    for i in range(num_steps):
+        s_curr = ss[i]
+        s_next = ss[i+1] # Integrate forward
+        ds = s_next - s_curr
+        
+        # Calculate t at current step for both streams
+        t_pix_scalar = get_t(s_curr, transport_pix.time_dist_shift)
+        t_rae_scalar = get_t(s_curr, transport_rae.time_dist_shift)
+        
+        t_pix = t_pix_scalar.repeat(B)
+        t_rae = t_rae_scalar.repeat(B)
+        
+        # Calculate derivatives dt/ds (scalar)
+        dt_ds_pix = get_dt_ds(s_curr, transport_pix.time_dist_shift)
+        dt_ds_rae = get_dt_ds(s_curr, transport_rae.time_dist_shift)
+        
+        # Predict Model Output (Velocity/Score/Noise)
+        model_out_pix, model_out_rae = model_fn(
+            x_pix=x_pix, 
+            x_rae=x_rae, 
+            t_pix=t_pix, 
+            t_rae=t_rae, 
+            **kwargs
+        )
+        
+        # Convert to Physical Drift dx/dt
+        drift_pix_dt = compute_ode_drift(transport_pix, x_pix, t_pix, model_out_pix)
+        drift_rae_dt = compute_ode_drift(transport_rae, x_rae, t_rae, model_out_rae)
+        
+        # Step State: x_next = x_curr + (dx/dt * dt/ds) * ds
+        x_pix = x_pix + drift_pix_dt * (dt_ds_pix * ds)
+        x_rae = x_rae + drift_rae_dt * (dt_ds_rae * ds)
+        
+    return x_pix, x_rae
 
 from eval import evaluate_generation_distributed
 
@@ -732,27 +815,37 @@ def main():
                          visual_sample_model_kwargs = deepcopy(sample_model_kwargs)
                          visual_sample_model_kwargs['y'] = labels[:n_vis]
 
-                    with autocast(**autocast_kwargs):
-                        samples_pix, _ = joint_sample_ode(
-                            zs_samples,
-                            zs_rae_samples,
-                            ema_model_fn,
-                            transport_pix=transport_pix,
-                            transport_rae=transport_rae,
-                            num_steps=sampler_params_pix.get("num_steps", 50),
-                            **visual_sample_model_kwargs
-                        )
-                    
-                    samples_pix.float()
+                    # with autocast(**autocast_kwargs): # Disable autocast for sampling to mimic exact pipeline
+                    samples_pix, samples_rae = joint_sample_ode(
+                        zs_samples,
+                        zs_rae_samples,
+                        ema_model_fn,
+                        transport_pix=transport_pix,
+                        transport_rae=transport_rae,
+                        num_steps=sampler_params_pix.get("num_steps", 50),
+                        sampler_type="dopri5",
+                        **visual_sample_model_kwargs
+                    )
+                
+                    samples_pix = samples_pix.float()
+                    samples_rae = samples_rae.float()
+
                     if use_guidance:
                         samples_pix, _ = samples_pix.chunk(2, dim=0)
+                        samples_rae, _ = samples_rae.chunk(2, dim=0)
                     
                     samples = samples_pix.cpu().float()
                     samples = samples.clamp(0, 1)
 
+                    # Decode RAE samples
+                    decoded_rae = rae.decode(samples_rae)
+                    decoded_rae = decoded_rae.cpu().float().clamp(0, 1)
+                    
                     dist.barrier()
+                    print(f"Rank{rank}")
                     if args.wandb and rank == 0:
-                        wandb_utils.log_image(samples, global_step)
+                        wandb_utils.log_image(samples, global_step, key="samples/pixel", caption="Pixel Stream Samples")
+                        wandb_utils.log_image(decoded_rae, global_step, key="samples/rae", caption="RAE Stream Samples")
                 logger.info("Generating EMA samples done.")
                 model.train()
             if do_eval and (eval_interval > 0 and global_step % eval_interval == 0):

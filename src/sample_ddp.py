@@ -140,6 +140,8 @@ def main(args):
 
     rae: RAE = instantiate_from_config(rae_config).to(device)
     model: Stage2ModelProtocol = instantiate_from_config(model_config).to(device)
+    import pdb; pdb.set_trace()
+
     rae.eval()
     model.eval()
 

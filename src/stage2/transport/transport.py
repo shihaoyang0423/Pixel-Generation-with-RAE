@@ -152,33 +152,33 @@ class Transport:
         return t0, t1
 
 
-    def sample(self, x1):
+    def sample(self, x1, t=None):
         """Sampling x0 & t based on shape of x1 (if needed)
           Args:
             x1 - data point; [batch, *dim]
         """
-        
         x0 = th.randn_like(x1)
-        dist_options = self.time_dist_type.split("_")
-        t0, t1 = self.check_interval(self.train_eps, self.sample_eps)
-        if dist_options[0] == "uniform":
-            t = th.rand((x1.shape[0],)) * (t1 - t0) + t0
-            # print('UNIFORM IS CALLED')
-        elif dist_options[0] == "logit-normal":
-            assert len(dist_options) == 3, "Logit-normal distribution must specify the mean and variance."
-            mu, sigma = float(dist_options[1]), float(dist_options[2])
-            assert sigma > 0, "Logit-normal distribution must have positive variance."
-            t = truncated_logitnormal_sample(
-                (x1.shape[0],), mu=mu, sigma=sigma, low=t0, high=t1
-            )
-            # print('LOGITNORMAL IS CALLED')
-        else:
-            raise NotImplementedError(f"Unknown time distribution type {self.time_dist_type}")
+        if t is None:
+            dist_options = self.time_dist_type.split("_")
+            t0, t1 = self.check_interval(self.train_eps, self.sample_eps)
+            if dist_options[0] == "uniform":
+                t = th.rand((x1.shape[0],)) * (t1 - t0) + t0
+                # print('UNIFORM IS CALLED')
+            elif dist_options[0] == "logit-normal":
+                assert len(dist_options) == 3, "Logit-normal distribution must specify the mean and variance."
+                mu, sigma = float(dist_options[1]), float(dist_options[2])
+                assert sigma > 0, "Logit-normal distribution must have positive variance."
+                t = truncated_logitnormal_sample(
+                    (x1.shape[0],), mu=mu, sigma=sigma, low=t0, high=t1
+                )
+                # print('LOGITNORMAL IS CALLED')
+            else:
+                raise NotImplementedError(f"Unknown time distribution type {self.time_dist_type}")
 
-        t = t.to(x1)
+            t = t.to(x1)
 
-        #sqrt_size_ratio = 1 / self.time_dist_shift # already sqrted
-        t = self.time_dist_shift * t / (1 + (self.time_dist_shift - 1) * t)
+            #sqrt_size_ratio = 1 / self.time_dist_shift # already sqrted
+            t = self.time_dist_shift * t / (1 + (self.time_dist_shift - 1) * t)
         return t, x0, x1
     
 
