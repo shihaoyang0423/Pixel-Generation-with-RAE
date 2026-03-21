@@ -114,6 +114,9 @@ def main(args):
     time_dist_shift_rae = math.sqrt(shift_dim_rae / shift_base_rae)
 
     print(f"Time shift Pix: {time_dist_shift_pix:.4f}, RAE: {time_dist_shift_rae:.4f}")
+    
+    # DEBUG: Enforce shift calculation print and transport checks
+    print(f"DEBUG: shift_dim_pix={shift_dim_pix}, shift_base_pix={shift_base_pix}")
 
     # Create Transport Objects
     transport_pix = create_transport(

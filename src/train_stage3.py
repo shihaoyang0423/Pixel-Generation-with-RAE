@@ -186,7 +186,7 @@ def joint_sample_ode(
         # Since 's' is already broadcasted to (B,) by integrators.py _fn,
         # t_pix and t_rae are also (B,).
         t_pix, dt_pix_ds = map_time_and_deriv(curr_s, transport_pix.time_dist_shift)
-        t_rae, dt_rae_ds = map_time_and_deriv(curr_s, transport_rae.time_dist_shift)
+        t_rae, dt_rae_ds = map_time_and_deriv(curr_s, transport_pix.time_dist_shift) # align with t_pix
         
         # Broadcast t for model input (B,)
         # Check if t needs broadcasting or not (if s was scalar)
@@ -367,14 +367,14 @@ def joint_sample_ode_naive(
         
         # Calculate t at current step for both streams
         t_pix_scalar = get_t(s_curr, transport_pix.time_dist_shift)
-        t_rae_scalar = get_t(s_curr, transport_rae.time_dist_shift)
+        t_rae_scalar = get_t(s_curr, transport_pix.time_dist_shift) # align with t_pix_scalar
         
         t_pix = t_pix_scalar.repeat(B)
         t_rae = t_rae_scalar.repeat(B)
         
         # Calculate derivatives dt/ds (scalar)
         dt_ds_pix = get_dt_ds(s_curr, transport_pix.time_dist_shift)
-        dt_ds_rae = get_dt_ds(s_curr, transport_rae.time_dist_shift)
+        dt_ds_rae = get_dt_ds(s_curr, transport_pix.time_dist_shift) # align with dt_ds_pix
         
         # Predict Model Output (Velocity/Score/Noise)
         model_out_pix, model_out_rae = model_fn(
@@ -384,6 +384,16 @@ def joint_sample_ode_naive(
             t_rae=t_rae, 
             **kwargs
         )
+        
+        if i == 0 or i == num_steps - 1 or i % 10 == 0:
+            # Calulate predicted x0 for debug
+            # Use scalar t for broadcasting
+            x0_debug = x_pix - t_pix_scalar * model_out_pix
+            print(f"Step {i} | s: {s_curr:.4f} -> {s_next:.4f} (ds={ds:.4f})")
+            print(f"  Pix: t={t_pix_scalar.item():.4f}, dt/ds={dt_ds_pix.item():.4f}")
+            print(f"  v_pix: mean={model_out_pix.mean():.4f}, std={model_out_pix.std():.4f}")
+            print(f"  x_pix: mean={x_pix.mean():.4f}, std={x_pix.std():.4f}")
+            print(f"  x0_pred: mean={x0_debug.mean():.4f}, std={x0_debug.std():.4f}, min={x0_debug.min():.4f}, max={x0_debug.max():.4f}")
         
         if capture_intermediates and intermediates is not None:
             # Calculate x0 prediction for visualization

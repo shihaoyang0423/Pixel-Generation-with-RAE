@@ -5,5 +5,5 @@ torchrun --standalone --nnodes=1 --nproc_per_node=1 \
   --sample-dir samples \
   --precision fp32 \
   --label-sampling equal \
-  --ckpt /data/zhangchi/ckpts/PixDDT/768dim/checkpoints/ep-0000004.pt \
+  --ckpt /data/zhangchi/ckpts/PixDDT/768dim/checkpoints/ep-0000006.pt \
   --naive 
