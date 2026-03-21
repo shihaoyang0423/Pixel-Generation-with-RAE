@@ -4,4 +4,6 @@ torchrun --standalone --nnodes=1 --nproc_per_node=1 \
   --config /home/zhangchi/RAE/configs/stage2/training/PixelDDT.yaml \
   --sample-dir samples \
   --precision fp32 \
-  --label-sampling equal
+  --label-sampling equal \
+  --ckpt /data/zhangchi/ckpts/PixDDT/768dim/checkpoints/ep-0000004.pt \
+  --naive 

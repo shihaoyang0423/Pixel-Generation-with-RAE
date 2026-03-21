@@ -270,7 +270,9 @@ def joint_sample_ode(
     x_init = (z_pix, z_rae)
     
     # ode.sample returns a list of samples (trajectory). We take the last one.
-    samples = _ode.sample(x_init, model_fn, **kwargs)
+    # Filter kwargs for ODE solver to remove intermediate tracking params not supported by model_fn
+    ode_kwargs = {k: v for k, v in kwargs.items() if k not in ['intermediates', 'capture_intermediates']}
+    samples = _ode.sample(x_init, model_fn, **ode_kwargs)
     
     samples_pix_hist, samples_rae_hist = samples
     
@@ -296,17 +298,39 @@ def joint_sample_ode_naive(
     B = z_pix.shape[0]
     device = z_pix.device
     
-    # helper for drift
-    def compute_ode_drift(transport, x, t, model_out):
-        if transport.model_type == ModelType.VELOCITY:
-            return model_out
-        # default to returning model out if unknown (assuming velocity matching)
-        return model_out
-        
     # 1. Define shared linear time grid 's'
     # Use transport_pix for the canonical 's' range.
     t0, t1 = transport_pix.check_interval(transport_pix.train_eps, transport_pix.sample_eps, eval=True)
-    ss = torch.linspace(t0, t1, num_steps + 1, device=device)
+    # Important: The standard ODE solver integrates DIFFERENTLY!
+    # Looking at integrators.py:
+    # self.t = 1 - th.linspace(t0, t1, num_steps)
+    # It integrates BACKWARDS from 1 to 0 (or Forward 0 to 1?).
+    # let's verify: t0=eps, t1=1-eps. linspace(eps, 1-eps). 1 - linspace -> (1-eps, eps).
+    # So it goes from HIGH to LOW t values?
+    # If path is x_t = (1-t)x0 + t*x1 (Linear), t=0 is noise, t=1 is data.
+    # We want to go from Noise (t=0?) to Data (t=1).
+    # IF integrators.py does "1 - linspace", then t starts at ~1 and goes to ~0. This means it generates NOISE from DATA (forward process).
+    # OR t=1 IS Noise and t=0 IS Data?
+    
+    # Let's check transport.py / path.py again.
+    # Standard SiT: t=0 is Data, t=1 is Noise. (Usually).
+    # If so, then sampling (Noise->Data) goes t: 1 -> 0.
+    # The integrators.py code "1 - linspace(t0, t1)" produces a decreasing sequence [1-eps, ..., eps].
+    # Which means we step with distinct negative dt.
+    
+    # In my naive implementation:
+    # ss = torch.linspace(t0, t1) which is Increasing [eps, 1-eps].
+    # This means I am integrating from eps -> 1-eps. (Low -> High).
+    
+    # IF correct direction is High -> Low (1->0), then my naive sampler is going BACKWARDS.
+    
+    # Let's align naive sampler with integrators.py logic:
+    # "self.t = 1 - th.linspace(t0, t1, num_steps)"
+    # So ss should be:
+    ss = 1.0 - torch.linspace(t0, t1, num_steps + 1, device=device)
+    # This gives us t: 1 -> 0.
+    # ds = s_next - s_curr will be NEGATIVE.
+    # This seems correct if we are integrating backwards in time.
     
     x_pix = z_pix.detach().clone()
     x_rae = z_rae.detach().clone()
@@ -320,11 +344,26 @@ def joint_sample_ode_naive(
         denom = 1 + (shift - 1) * s
         return shift / (denom ** 2)
 
+    # Extract intermediate tracking args to avoid passing to model
+    capture_intermediates = kwargs.pop('capture_intermediates', False)
+    intermediates = kwargs.pop('intermediates', None)
+
+    # Internal helper for drift evaluation (Standard RK4 needs 4 evals)
+    # Reverting to Euler as requested, but keeping the correct time direction (1 -> 0)
+    
+    # 1. Define shared linear time grid 's'
+    # Use transport_pix for the canonical 's' range.
+    t0, t1 = transport_pix.check_interval(transport_pix.train_eps, transport_pix.sample_eps, eval=True)
+    
+    # Integrators.py uses 1 - ... for sampling (High t to Low t) for Noise -> Data
+    # t starts at ~1 (Noise) and goes to ~0 (Data)
+    ss = 1.0 - torch.linspace(t0, t1, num_steps + 1, device=device)
+
     # Euler Integration Loop
     for i in range(num_steps):
         s_curr = ss[i]
-        s_next = ss[i+1] # Integrate forward
-        ds = s_next - s_curr
+        s_next = ss[i+1] # Integrate forward (in s space, which goes 1->0)
+        ds = s_next - s_curr # Negative value
         
         # Calculate t at current step for both streams
         t_pix_scalar = get_t(s_curr, transport_pix.time_dist_shift)
@@ -346,6 +385,31 @@ def joint_sample_ode_naive(
             **kwargs
         )
         
+        if capture_intermediates and intermediates is not None:
+            # Calculate x0 prediction for visualization
+            # Assuming standard Rectified Flow / Velocity:
+            # t=1 is Noise, t=0 is Data.
+            # v = dx/dt = Noise - Data.
+            # x_t = Data + t * (Noise - Data) = Data + t * v
+            # So Data (x0) = x_t - t * v
+            
+            # Helper to broadcast t for subtraction
+            def pred_x0(x, v, t_scalar):
+                # t_scalar is (1,) tensor from get_t
+                return x - t_scalar * v
+
+            x0_pix = pred_x0(x_pix, model_out_pix, t_pix_scalar)
+            x0_rae = pred_x0(x_rae, model_out_rae, t_rae_scalar)
+
+            intermediates.append({
+                'step': i,
+                't_pix': t_pix_scalar.item(),
+                'x_pix': x0_pix.detach().cpu(), # Storing PREDICTED x0
+                'x_rae': x0_rae.detach().cpu(), # Storing PREDICTED x0
+                'v_pix': model_out_pix.detach().cpu(),
+                'v_rae': model_out_rae.detach().cpu()
+            })
+
         # Convert to Physical Drift dx/dt
         drift_pix_dt = compute_ode_drift(transport_pix, x_pix, t_pix, model_out_pix)
         drift_rae_dt = compute_ode_drift(transport_rae, x_rae, t_rae, model_out_rae)

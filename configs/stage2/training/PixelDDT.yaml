@@ -101,9 +101,9 @@ training:
   grad_accum_steps: 1 # change according to your GPU memory
   ema_decay: 0.9999
   num_workers: 16
-  log_interval: 100
+  log_interval: 10
   checkpoint_interval: 1
-  sample_every: 1000
+  sample_every: 500
   clip_grad: 1.0
   global_seed: 42
   optimizer:
