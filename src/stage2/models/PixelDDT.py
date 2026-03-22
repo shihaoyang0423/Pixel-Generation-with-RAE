@@ -98,6 +98,32 @@ class PixelLightningDDTBlock(nn.Module):
         return x
 
 
+class PixelConvLastLayer(nn.Module):
+    """
+    The final layer of DDT.
+    """
+    def __init__(self, hidden_size, patch_size, out_channels, use_rmsnorm=False):
+        super().__init__()
+        if not use_rmsnorm:
+            self.norm_final = nn.LayerNorm(
+                hidden_size, elementwise_affine=False, eps=1e-6)
+        else:
+            self.norm_final = RMSNorm(hidden_size)
+        self.linear = nn.Linear(
+            hidden_size, patch_size * patch_size * out_channels, bias=True)
+        self.adaLN_modulation = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(hidden_size, 2 * hidden_size, bias=True)
+        )
+
+    def forward(self, x, c):
+        if len(c.shape) < len(x.shape):
+            c = c.unsqueeze(1)
+        shift, scale = self.adaLN_modulation(c).chunk(2, dim=-1)
+        x = DDTModulate(self.norm_final(x), shift, scale)  # no gate
+        x = self.linear(x)
+        return x
+
 
 class PixelDDT(nn.Module):
     """

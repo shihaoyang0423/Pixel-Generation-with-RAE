@@ -75,6 +75,15 @@ def compute_ode_drift(transport, x, t, model_output):
         return (-drift_mean + drift_var * model_output)
     elif transport.model_type == ModelType.VELOCITY:
         return model_output
+    elif transport.model_type == ModelType.DATA:
+        # User wants x0 (data) prediction. model_output is predicted x1.
+        # We need to map x1 prediction to velocity to integrate.
+        t_expand = path.expand_t_like_x(t, x)
+        alpha_t, d_alpha_t = transport.path_sampler.compute_alpha_t(t_expand)
+        sigma_t, d_sigma_t = transport.path_sampler.compute_sigma_t(t_expand)
+        pred_x0 = (x - alpha_t * model_output) / sigma_t
+        pred_ut = d_alpha_t * model_output + d_sigma_t * pred_x0
+        return pred_ut
     else:
         raise NotImplementedError(f"Unknown transport model type: {transport.model_type}")
 
@@ -83,10 +92,11 @@ def joint_training_losses(model, x1_pix, x1_rae, transport_pix, transport_rae, m
     Compute joint loss for Pixel (x) and RAE (z) streams.
     """
     # 1. Sample t and noise for Pixel stream
-    t_pix, x0_pix, _ = transport_pix.sample(x1_pix) 
+    t_pix, x0_pix, _, t_ori = transport_pix.sample(x1_pix) 
     
     # 2. Sample t and noise for RAE stream (Decoupled t)
-    t_rae, x0_rae, _ = transport_rae.sample(x1_rae, t_pix) # Same timestep
+    t_rae, x0_rae, _, _ = transport_rae.sample(x1_rae, t_ori) # Same timestep
+    print(t_pix[0], t_rae[0])
     
     # 3. Plan (Interpolate)
     # Pixel Plan
@@ -110,6 +120,14 @@ def joint_training_losses(model, x1_pix, x1_rae, transport_pix, transport_rae, m
     def compute_stream_loss(trans, pred, target, xt, x0, t):
         if trans.model_type == ModelType.VELOCITY:
             return mean_flat(((pred - target) ** 2))
+        elif trans.model_type == ModelType.DATA:
+            # Use velocity loss. Hard coded. TODO: support different loss types.
+            t_expand = path.expand_t_like_x(t, xt)
+            alpha_t, d_alpha_t = trans.path_sampler.compute_alpha_t(t_expand)
+            sigma_t, d_sigma_t = trans.path_sampler.compute_sigma_t(t_expand)
+            pred_x0 = (xt - alpha_t * pred) / sigma_t
+            pred_ut = d_alpha_t * pred + d_sigma_t * pred_x0
+            return mean_flat(((pred_ut - target) ** 2))
         else:
             # Re-implement transport.training_losses logic for score/noise
             _, drift_var = trans.path_sampler.compute_drift(xt, t)
@@ -186,7 +204,7 @@ def joint_sample_ode(
         # Since 's' is already broadcasted to (B,) by integrators.py _fn,
         # t_pix and t_rae are also (B,).
         t_pix, dt_pix_ds = map_time_and_deriv(curr_s, transport_pix.time_dist_shift)
-        t_rae, dt_rae_ds = map_time_and_deriv(curr_s, transport_pix.time_dist_shift) # align with t_pix
+        t_rae, dt_rae_ds = map_time_and_deriv(curr_s, transport_rae.time_dist_shift) # align with t_pix
         
         # Broadcast t for model input (B,)
         # Check if t needs broadcasting or not (if s was scalar)
@@ -204,6 +222,7 @@ def joint_sample_ode(
             dt_broad_rae = dt_rae_ds.view(B, *([1]*(x_rae.ndim-1)))
         
         # Model Forward
+        print(t_input_pix, t_input_rae)
         model_out_pix, model_out_rae = model_fn(
             x_pix=x_pix, 
             x_rae=x_rae, 
@@ -401,29 +420,33 @@ def joint_sample_ode_naive(
             # t=1 is Noise, t=0 is Data.
             # v = dx/dt = Noise - Data.
             # x_t = Data + t * (Noise - Data) = Data + t * v
-            # So Data (x0) = x_t - t * v
+            # Convert to Physical Drift dx/dt
+            drift_pix_dt = compute_ode_drift(transport_pix, x_pix, t_pix, model_out_pix)
+            drift_rae_dt = compute_ode_drift(transport_rae, x_rae, t_rae, model_out_rae)
+
+        if capture_intermediates and intermediates is not None:
+            # Assuming linear schedule for debugging/vis:
+            # v = (x_t - x_data) / t_scale -> roughly x_data = x_t - t * v (in DDPM notation, Data is x0)
+            # Actually with ICPlan, Data is x1, Noise is x0.
+            # So Data = x_t - t * v
             
             # Helper to broadcast t for subtraction
             def pred_x0(x, v, t_scalar):
                 # t_scalar is (1,) tensor from get_t
                 return x - t_scalar * v
 
-            x0_pix = pred_x0(x_pix, model_out_pix, t_pix_scalar)
-            x0_rae = pred_x0(x_rae, model_out_rae, t_rae_scalar)
+            x0_pix = pred_x0(x_pix, drift_pix_dt, t_pix_scalar)
+            x0_rae = pred_x0(x_rae, drift_rae_dt, t_rae_scalar)
 
             intermediates.append({
                 'step': i,
                 't_pix': t_pix_scalar.item(),
-                'x_pix': x0_pix.detach().cpu(), # Storing PREDICTED x0
-                'x_rae': x0_rae.detach().cpu(), # Storing PREDICTED x0
-                'v_pix': model_out_pix.detach().cpu(),
-                'v_rae': model_out_rae.detach().cpu()
+                'x_pix': x0_pix.detach().cpu(), # Storing PREDICTED Data
+                'x_rae': x0_rae.detach().cpu(), 
+                'v_pix': drift_pix_dt.detach().cpu(),
+                'v_rae': drift_rae_dt.detach().cpu()
             })
 
-        # Convert to Physical Drift dx/dt
-        drift_pix_dt = compute_ode_drift(transport_pix, x_pix, t_pix, model_out_pix)
-        drift_rae_dt = compute_ode_drift(transport_rae, x_rae, t_rae, model_out_rae)
-        
         # Step State: x_next = x_curr + (dx/dt * dt/ds) * ds
         x_pix = x_pix + drift_pix_dt * (dt_ds_pix * ds)
         x_rae = x_rae + drift_rae_dt * (dt_ds_rae * ds)
