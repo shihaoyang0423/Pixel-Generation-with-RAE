@@ -96,7 +96,6 @@ def joint_training_losses(model, x1_pix, x1_rae, transport_pix, transport_rae, m
     
     # 2. Sample t and noise for RAE stream (Decoupled t)
     t_rae, x0_rae, _, _ = transport_rae.sample(x1_rae, t_ori) # Same timestep
-    print(t_pix[0], t_rae[0])
     
     # 3. Plan (Interpolate)
     # Pixel Plan
@@ -222,7 +221,6 @@ def joint_sample_ode(
             dt_broad_rae = dt_rae_ds.view(B, *([1]*(x_rae.ndim-1)))
         
         # Model Forward
-        print(t_input_pix, t_input_rae)
         model_out_pix, model_out_rae = model_fn(
             x_pix=x_pix, 
             x_rae=x_rae, 
