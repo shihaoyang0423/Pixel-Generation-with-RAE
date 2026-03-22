@@ -6,7 +6,6 @@ wandb
 /results/
 pretrained_models
 
-/models/
 __pycache__/
 *.pth
 .cache/
@@ -17,4 +16,3 @@ upload_to_hf.py
 /data/
 /ckpts/
 data
-models
