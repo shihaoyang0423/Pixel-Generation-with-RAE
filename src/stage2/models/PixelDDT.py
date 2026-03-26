@@ -211,10 +211,12 @@ class PixelDDT(nn.Module):
         if stage2_ckpt:
             try:
                 state_dict = torch.load(stage2_ckpt, map_location='cpu')
-                if 'model' in state_dict:
-                    state_dict = state_dict['model']
-                elif 'ema' in state_dict:
+                # Change order of model and ema
+                if 'ema' in state_dict:
                     state_dict = state_dict['ema']
+                elif 'model' in state_dict:
+                    state_dict = state_dict['model']
+                
                 
                 # DDT might be saved with 'module.' prefix if DDP
                 # Clean keys
@@ -337,7 +339,9 @@ class PixelDDT(nn.Module):
         x_pix_emb = self.x_embedder(x_pix) + self.pos_embed
         
         t_emb = self.t_embedder(t_pix)
-        y_emb = self.y_embedder(y, self.training)
+        # y_emb = self.y_embedder(y, self.training)
+        y_emb = y_ddt #Reuse y_emb from DDT for dropout consistency
+        
         c = nn.functional.silu(t_emb + y_emb)
         
         # Zip safely to inject the structurally aligned latents

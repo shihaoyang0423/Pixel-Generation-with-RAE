@@ -384,14 +384,14 @@ def joint_sample_ode_naive(
         
         # Calculate t at current step for both streams
         t_pix_scalar = get_t(s_curr, transport_pix.time_dist_shift)
-        t_rae_scalar = get_t(s_curr, transport_pix.time_dist_shift) # align with t_pix_scalar
+        t_rae_scalar = get_t(s_curr, transport_rae.time_dist_shift)
         
         t_pix = t_pix_scalar.repeat(B)
         t_rae = t_rae_scalar.repeat(B)
         
         # Calculate derivatives dt/ds (scalar)
         dt_ds_pix = get_dt_ds(s_curr, transport_pix.time_dist_shift)
-        dt_ds_rae = get_dt_ds(s_curr, transport_pix.time_dist_shift) # align with dt_ds_pix
+        dt_ds_rae = get_dt_ds(s_curr, transport_rae.time_dist_shift) 
         
         # Predict Model Output (Velocity/Score/Noise)
         model_out_pix, model_out_rae = model_fn(
