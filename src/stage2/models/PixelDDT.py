@@ -98,6 +98,103 @@ class PixelLightningDDTBlock(nn.Module):
         return x
 
 
+class RPFuse(nn.Module):
+    """
+    Fusion of RAE and Pix
+    """
+    def __init__(self, rae_hidden_size, pixel_hidden_size):
+        super().__init__()
+        self.scale = nn.Linear(rae_hidden_size, pixel_hidden_size)
+        self.gate = nn.Linear(rae_hidden_size, pixel_hidden_size)
+        self.bias = nn.Linear(rae_hidden_size, pixel_hidden_size)
+
+    def forward(self, rae_latent, pixel):
+        gate = torch.sigmoid(self.gate(rae_latent))
+        gated_rae = rae_latent * gate
+        return pixel * self.scale(gated_rae) + self.bias(gated_rae)
+
+
+class PixelLightningDDTBlockv2(nn.Module):
+    """
+    Pixel-level DiT Block with spatial downsampling, RAE latent injection,
+    bottleneck Attention/MLP, upsampling, and residual connection.
+    """
+    def __init__(
+        self,
+        hidden_size,
+        num_heads,
+        rae_hidden_size=None,
+        mlp_ratio=4.0,
+        use_qknorm=False,
+        use_swiglu=True,
+        use_rmsnorm=True,
+        wo_shift=False,
+        **block_kwargs
+    ):
+        super().__init__()
+        self.hidden_size = hidden_size
+        rae_hidden_size = rae_hidden_size or hidden_size
+
+        # 2. RAE Latent Alignment Projection
+        self.rp_fuse = RPFuse(rae_hidden_size, hidden_size)
+
+        # 3. Standard DDT Components (Operating at the bottleneck)
+        norm_layer = RMSNorm if use_rmsnorm else lambda dim: nn.LayerNorm(dim, elementwise_affine=False, eps=1e-6)
+        self.norm1 = norm_layer(hidden_size)
+        self.norm2 = norm_layer(hidden_size)
+
+        self.attn = NormAttention(
+            hidden_size, num_heads=num_heads, qkv_bias=True, 
+            qk_norm=use_qknorm, use_rmsnorm=use_rmsnorm, **block_kwargs
+        )
+
+        mlp_hidden_dim = int(hidden_size * mlp_ratio)
+        if use_swiglu:
+            self.mlp = SwiGLUFFN(hidden_size, int(2/3 * mlp_hidden_dim))
+        else:
+            self.mlp = Mlp(in_features=hidden_size, hidden_features=mlp_hidden_dim, act_layer=lambda: nn.GELU(approximate="tanh"), drop=0)
+
+        
+        # AdaLN Modulation
+        shift_multiplier = 4 if wo_shift else 6
+        self.adaLN_modulation = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(hidden_size, shift_multiplier * hidden_size, bias=True)
+        )
+        self.wo_shift = wo_shift
+
+    def forward(self, x, c, rae_latent, feat_rope=None, H=None, W=None):
+        """
+        x: Pixel latent [B, L, C]
+        c: Conditioning [B, C]
+        rae_latent: Pre-computed DINO/RAE features [B, L/4, C_rae]
+        H, W: Spatial dimensions of the input pixel sequence. If None, assumes square.
+        """
+        B, L, C = x.shape
+        if H is None or W is None:
+            H = W = int(sqrt(L))
+            
+
+        # --- INJECT RAE LATENT ---
+        # Add the structural prior directly into the downsampled pixel stream
+        x = self.rp_fuse(rae_latent, x)
+
+        # --- DDT BLOCK (At Bottleneck Resolution) ---
+        if len(c.shape) < len(x.shape):
+            c = c.unsqueeze(1)
+            
+        if self.wo_shift:
+            scale_msa, gate_msa, scale_mlp, gate_mlp = self.adaLN_modulation(c).chunk(4, dim=-1)
+            shift_msa = shift_mlp = None
+        else:
+            shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(c).chunk(6, dim=-1)
+
+        # Attention
+        x = x + DDTGate(self.attn(DDTModulate(self.norm1(x), shift_msa, scale_msa), rope=feat_rope), gate_msa)
+        # MLP (Heavy Lifting done here at L/4 sequence length)
+        x = x + DDTGate(self.mlp(DDTModulate(self.norm2(x), shift_mlp, scale_mlp)), gate_mlp)
+
+        return x
 class PixelConvLastLayer(nn.Module):
     """
     The final layer of DDT.
@@ -180,7 +277,7 @@ class PixelDDT(nn.Module):
         # 5. Pixel DiT Blocks (DDT Style)
         # We reuse LightningDDTBlock
         self.blocks = nn.ModuleList([
-            PixelLightningDDTBlock(
+            PixelLightningDDTBlockv2(
                 hidden_size, 
                 num_heads, 
                 rae_hidden_size=self.ddt.encoder_hidden_size if i<self.ddt.num_encoder_blocks else self.ddt.decoder_hidden_size,
@@ -340,9 +437,9 @@ class PixelDDT(nn.Module):
         
         t_emb = self.t_embedder(t_pix)
         # y_emb = self.y_embedder(y, self.training)
-        y_emb = y_ddt #Reuse y_emb from DDT for dropout consistency
+        # y_emb = y_ddt #Reuse y_emb from DDT for dropout consistency
         
-        c = nn.functional.silu(t_emb + y_emb)
+        c = nn.functional.silu(t_emb)
         
         # Zip safely to inject the structurally aligned latents
         for block, rae_lat in zip(self.blocks, rae_latents):
