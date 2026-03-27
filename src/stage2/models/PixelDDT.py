@@ -109,6 +109,8 @@ class RPFuse(nn.Module):
         self.bias = nn.Linear(rae_hidden_size, pixel_hidden_size)
 
     def forward(self, rae_latent, pixel):
+        # Normalize each channel of the RAE latent
+        rae_latent = F.normalize(rae_latent, dim=-1)
         gate = torch.sigmoid(self.gate(rae_latent))
         gated_rae = rae_latent * gate
         return pixel * self.scale(gated_rae) + self.bias(gated_rae)
