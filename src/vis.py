@@ -160,8 +160,8 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, default="/home/zhangchi/RAE/configs/stage2/training/PixelDDT_test.yaml", help="Path to the config file.")
-    parser.add_argument("--image-path", type=str, default="/home/zhangchi/RAE/assets/pixabay_cat.png", help="Path to the input image.")
+    parser.add_argument("--config", type=str, default="~/RAE/configs/stage2/training/PixelDDT_test.yaml", help="Path to the config file.")
+    parser.add_argument("--image-path", type=str, default="~/RAE/assets/pixabay_cat.png", help="Path to the input image.")
     parser.add_argument("--output", type=str, default="transport_vis.png", help="Output image path.")
     parser.add_argument("--image-size", type=int, default=256, help="Image size.")
     
