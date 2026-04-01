@@ -211,11 +211,12 @@ class PixelDDT(nn.Module):
         if stage2_ckpt:
             try:
                 state_dict = torch.load(stage2_ckpt, map_location='cpu')
-                if 'model' in state_dict:
-                    state_dict = state_dict['model']
-                elif 'ema' in state_dict:
+                # Change order of model and ema
+                if 'ema' in state_dict:
                     state_dict = state_dict['ema']
-                
+                elif 'model' in state_dict:
+                    state_dict = state_dict['model']
+
                 # DDT might be saved with 'module.' prefix if DDP
                 # Clean keys
                 new_state_dict = {}
@@ -234,6 +235,15 @@ class PixelDDT(nn.Module):
         for p in self.ddt.parameters():
             p.requires_grad = False
         self.ddt.eval()
+
+    def train(self, mode: bool = True):
+        """
+        Keep PixelDDT train/eval behavior, but force frozen DDT to stay in eval.
+        This prevents dropout/stat updates in DDT during both training and inference.
+        """
+        super().train(mode)
+        self.ddt.eval()
+        return self
         
 
     def initialize_weights(self):
@@ -298,7 +308,9 @@ class PixelDDT(nn.Module):
         # ==========================================
         with torch.no_grad():
             t_ddt = self.ddt.t_embedder(t_rae)
-            y_ddt = self.ddt.y_embedder(y, self.training)
+            # y_ddt = self.ddt.y_embedder(y, False)
+            # Frozen DDT should always run as inference path.
+            y_ddt = self.ddt.y_embedder(y, False)
             c_ddt = nn.functional.silu(t_ddt + y_ddt)
             
             # Embed RAE latents
@@ -338,6 +350,7 @@ class PixelDDT(nn.Module):
         
         t_emb = self.t_embedder(t_pix)
         y_emb = self.y_embedder(y, self.training)
+        # y_emb = y_ddt # Reuse y_emb from DDT for dropout consistency
         c = nn.functional.silu(t_emb + y_emb)
         
         # Zip safely to inject the structurally aligned latents

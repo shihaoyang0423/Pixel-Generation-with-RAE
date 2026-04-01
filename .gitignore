@@ -16,3 +16,5 @@ upload_to_hf.py
 /data/
 /ckpts/
 data
+record.txt
+train_full.log

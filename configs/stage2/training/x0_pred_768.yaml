@@ -2,40 +2,40 @@ stage_1:
   target: stage1.RAE
   params:
     encoder_cls: 'Dinov2withNorm'
-    encoder_config_path: 'facebook/dinov2-with-registers-base'
+    encoder_config_path: '/home/shihaoyang/data/pretrained/encoders/dinov2-with-registers-base'
     encoder_input_size: 224
     encoder_params:
-      dinov2_path: 'facebook/dinov2-with-registers-base'
+      dinov2_path: '/home/shihaoyang/data/pretrained/encoders/dinov2-with-registers-base'
       normalize: true
     decoder_config_path: 'configs/decoder/ViTXL'
-    pretrained_decoder_path: '/data/zhangchi/pretrained/decoders/dinov2/wReg_base/ViTXL_n08/model.pt'
+    pretrained_decoder_path: '/data/shihaoyang/pretrained/decoders/dinov2/wReg_base/ViTXL_n08/model.pt'
     noise_tau: 0.0
     reshape_to_2d: true
-    normalization_stat_path: '/data/zhangchi/pretrained/stats/dinov2/wReg_base/imagenet1k/stat.pt'
+    normalization_stat_path: '/data/shihaoyang/pretrained/stats/dinov2/wReg_base/imagenet1k/stat.pt'
 
 
 stage_2:
-  target: stage2.models.PixelDDT.PixelDDT
+  target: stage2.models.PixelDDT_v2.PixelDDT
   params:
     input_size: 256
     patch_size: 16
     in_channels: 3
-    hidden_size: 768
-    depth: 30
-    num_heads: 12
+    hidden_size: 256 #原768
+    depth: 14 #原30
+    num_heads: 8 #原12
     mlp_ratio: 4.0
     class_dropout_prob: 0.1
     num_classes: 1000
     
     # Pretrained DDT Config (Copied from DiTDH-XL_DINOv2-B.yaml essentially)
-    stage2_ckpt: '/data/zhangchi/pretrained/DiTs/Dinov2/wReg_base/ImageNet256/DiTDH-XL/stage2_model.pt' # Placeholder path - user needs to set this
+    stage2_ckpt: '/home/shihaoyang/data/pretrained/DiTs/Dinov2/wReg_base/ImageNet256/DiTDH-S_ep20/stage2_model.pt' # Placeholder path - user needs to set this
     stage2_config:
       input_size: 16
       patch_size: 1
       in_channels: 768
-      hidden_size: [1152, 2048]
-      depth: [28, 2]
-      num_heads: [16, 16]
+      hidden_size: [384, 2048] #原[1152, 2048]
+      depth: [12, 2] #原[28, 2]
+      num_heads: [6, 16] #原[16, 16]
       mlp_ratio: 4.0
       class_dropout_prob: 0.1
       num_classes: 1000
@@ -93,8 +93,8 @@ misc_rae:
 eval:
   eval_interval: 25000 # every 10 epochs
   eval_model: true
-  data_path: '/data/zhangchi/data/imagenet/256/val'
-  reference_npz_path: '/data/zhangchi/data/VIRTUAL_imagenet256_labeled.npz'
+  data_path: '/data/shihaoyang/data/imagenet/256/val'
+  reference_npz_path: '/data/shihaoyang/data/VIRTUAL_imagenet256_labeled.npz'
 
 
 training:
@@ -105,7 +105,7 @@ training:
   num_workers: 16
   log_interval: 10
   checkpoint_interval: 1
-  sample_every: 500
+  sample_every: 2000 #原500
   clip_grad: 1.0
   global_seed: 42
   optimizer:

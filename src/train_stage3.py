@@ -9,6 +9,7 @@ import logging
 import math
 import os
 import pdb
+import sys
 from collections import defaultdict, OrderedDict
 import torch
 # the first flag below was False when we tested this script but True makes A100 training a lot faster:
@@ -288,7 +289,10 @@ def joint_sample_ode(
     
     # ode.sample returns a list of samples (trajectory). We take the last one.
     # Filter kwargs for ODE solver to remove intermediate tracking params not supported by model_fn
-    ode_kwargs = {k: v for k, v in kwargs.items() if k not in ['intermediates', 'capture_intermediates']}
+    ode_kwargs = {
+        k: v for k, v in kwargs.items()
+        if k not in ['intermediates', 'capture_intermediates', 'verbose']
+    }
     samples = _ode.sample(x_init, model_fn, **ode_kwargs)
     
     samples_pix_hist, samples_rae_hist = samples
@@ -361,9 +365,10 @@ def joint_sample_ode_naive(
         denom = 1 + (shift - 1) * s
         return shift / (denom ** 2)
 
-    # Extract intermediate tracking args to avoid passing to model
+    # Extract flags that must not be forwarded to model_fn
     capture_intermediates = kwargs.pop('capture_intermediates', False)
     intermediates = kwargs.pop('intermediates', None)
+    verbose = kwargs.pop('verbose', False)
 
     # Internal helper for drift evaluation (Standard RK4 needs 4 evals)
     # Reverting to Euler as requested, but keeping the correct time direction (1 -> 0)
@@ -384,14 +389,14 @@ def joint_sample_ode_naive(
         
         # Calculate t at current step for both streams
         t_pix_scalar = get_t(s_curr, transport_pix.time_dist_shift)
-        t_rae_scalar = get_t(s_curr, transport_pix.time_dist_shift) # align with t_pix_scalar
+        t_rae_scalar = get_t(s_curr, transport_rae.time_dist_shift)
         
         t_pix = t_pix_scalar.repeat(B)
         t_rae = t_rae_scalar.repeat(B)
         
         # Calculate derivatives dt/ds (scalar)
         dt_ds_pix = get_dt_ds(s_curr, transport_pix.time_dist_shift)
-        dt_ds_rae = get_dt_ds(s_curr, transport_pix.time_dist_shift) # align with dt_ds_pix
+        dt_ds_rae = get_dt_ds(s_curr, transport_rae.time_dist_shift) 
         
         # Predict Model Output (Velocity/Score/Noise)
         model_out_pix, model_out_rae = model_fn(
@@ -402,7 +407,7 @@ def joint_sample_ode_naive(
             **kwargs
         )
         
-        if i == 0 or i == num_steps - 1 or i % 10 == 0:
+        if verbose and (i == 0 or i == num_steps - 1 or i % 10 == 0):
             # Calulate predicted x0 for debug
             # Use scalar t for broadcasting
             x0_debug = x_pix - t_pix_scalar * model_out_pix
@@ -412,15 +417,9 @@ def joint_sample_ode_naive(
             print(f"  x_pix: mean={x_pix.mean():.4f}, std={x_pix.std():.4f}")
             print(f"  x0_pred: mean={x0_debug.mean():.4f}, std={x0_debug.std():.4f}, min={x0_debug.min():.4f}, max={x0_debug.max():.4f}")
         
-        if capture_intermediates and intermediates is not None:
-            # Calculate x0 prediction for visualization
-            # Assuming standard Rectified Flow / Velocity:
-            # t=1 is Noise, t=0 is Data.
-            # v = dx/dt = Noise - Data.
-            # x_t = Data + t * (Noise - Data) = Data + t * v
-            # Convert to Physical Drift dx/dt
-            drift_pix_dt = compute_ode_drift(transport_pix, x_pix, t_pix, model_out_pix)
-            drift_rae_dt = compute_ode_drift(transport_rae, x_rae, t_rae, model_out_rae)
+        # Always compute physical drift dx/dt – needed for the Euler step below.
+        drift_pix_dt = compute_ode_drift(transport_pix, x_pix, t_pix, model_out_pix)
+        drift_rae_dt = compute_ode_drift(transport_rae, x_rae, t_rae, model_out_rae)
 
         if capture_intermediates and intermediates is not None:
             # Assuming linear schedule for debugging/vis:
@@ -481,7 +480,11 @@ def load_checkpoint(
     optimizer: torch.optim.Optimizer,
     scheduler: Optional[LambdaLR],
 ) -> Tuple[int, int]:
-    checkpoint = torch.load(path, map_location="cpu")
+    try:
+        checkpoint = torch.load(path, map_location="cpu")
+    except Exception as e:
+        print(f"[ERROR] Checkpoint file is corrupt (incomplete save?): {e}", flush=True)
+        sys.exit(2)
     model.module.load_state_dict(checkpoint["model"])
     ema_model.load_state_dict(checkpoint["ema"])
     optimizer.load_state_dict(checkpoint["optimizer"])
@@ -650,10 +653,12 @@ def main():
     ema_model.eval()
     # model.requires_grad_(True) # Do NOT force unfreeze. Let model.__init__ decide what is frozen (e.g. DDT).
     model.train() # Set to train mode (Dropout, BatchNorm, etc.)
+    model.ddt.eval() # Keep frozen DDT in eval mode
     ddp_model = DDP(model, device_ids=[device.index], broadcast_buffers=False, find_unused_parameters=False)
     # ddp_model = torch.compile(ddp_model) # fix shape compile, see if it works
     model = ddp_model.module
     ddp_model.train()
+    model.ddt.eval()
     # no need to put RAE into DDP since it's frozen
     model_param_count = sum(p.numel() for p in model.parameters())
     logger.info(f"Model Parameters: {model_param_count/1e6:.2f}M")
@@ -804,6 +809,7 @@ def main():
     dist.barrier() 
     for epoch in range(start_epoch, num_epochs):
         model.train()
+        model.ddt.eval()
         sampler.set_epoch(epoch)
         epoch_metrics = defaultdict(lambda: torch.zeros(1, device=device))
         num_batches = 0
@@ -845,6 +851,9 @@ def main():
                     model_kwargs
                 )
                 loss = loss_pix.mean()
+                if torch.isnan(loss):
+                    print(f"[ERROR] NaN loss detected at epoch {epoch} step {global_step}. Exiting.", flush=True)
+                    sys.exit(1)
 
             loss.float()
             if scaler:
@@ -943,6 +952,7 @@ def main():
                         wandb_utils.log_image(decoded_rae, global_step, key="samples/rae", caption="RAE Stream Samples")
                 logger.info("Generating EMA samples done.")
                 model.train()
+                model.ddt.eval()
             if do_eval and (eval_interval > 0 and global_step % eval_interval == 0):
                 logger.warning("Evaluation disabled for PixelDDT dual-stream model pending refactor of evaluation pipeline.")
                 # logger.info("Starting evaluation...")
