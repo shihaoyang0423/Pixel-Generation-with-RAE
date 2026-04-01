@@ -816,7 +816,7 @@ def main():
         optimizer.zero_grad()
         accum_counter = 0
         step_loss_accum = 0.0
-        if checkpoint_interval > 0 and epoch % checkpoint_interval == 0  and rank == 0:
+        if checkpoint_interval > 0 and epoch % checkpoint_interval == 0 and epoch>0 and rank == 0:
             logger.info(f"Saving checkpoint at epoch {epoch}...")
             ckpt_path = f"{checkpoint_dir}/ep-{epoch:07d}.pt" 
             save_checkpoint(

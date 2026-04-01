@@ -238,6 +238,7 @@ class PixelDDT(nn.Module):
         patch_size=16,
         in_channels=3,
         hidden_size=384,
+        depth=6,
         num_heads=6,
         mlp_ratio=4.0,
         class_dropout_prob=0.1,
@@ -255,6 +256,7 @@ class PixelDDT(nn.Module):
         self.in_channels = in_channels
         self.out_channels = in_channels
         self.patch_size = patch_size
+        self.depth = depth
         self.num_heads = num_heads
         self.hidden_size = hidden_size
         self.input_size = input_size
@@ -287,7 +289,7 @@ class PixelDDT(nn.Module):
                 use_swiglu=use_swiglu, 
                 use_rmsnorm=use_rmsnorm,
                 wo_shift=wo_shift,
-            ) for i in range(12) # range(self.ddt.num_decoder_blocks)
+            ) for i in range(self.depth)
         ])
         
         # 6. Final Layer
@@ -449,7 +451,7 @@ class PixelDDT(nn.Module):
         # s_trans = nn.functional.silu(t_pix_broadcast + s_trans)
         
         # c = nn.functional.silu(t_pix + y_emb)
-        for i in range(12): # range(self.ddt.num_decoder_blocks)
+        for i in range(self.depth): # range(self.ddt.num_decoder_blocks)
             x_pix_emb = self.blocks[i](x_pix_emb, s_trans, feat_rope=self.feat_rope)
         
             
