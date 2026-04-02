@@ -9,29 +9,28 @@
 # 用法（tmux 内）：
 #   tmux new -s train
 #   export EXPERIMENT_NAME=PixDDTv2_4
-#   bash ~/RAE/retry_train_stage3.sh
+#   bash /home/shihaoyang/RAE/retry_train_stage3.sh
 #   Ctrl-B D  → 退出 tmux 但脚本继续跑
 #   Ctrl-C    → 停止脚本
 
-export PATH="~/miniconda3/envs/rae/bin:$PATH"
-export EXPERIMENT_NAME="PixDDT_small_v2baseline"
+export EXPERIMENT_NAME="${EXPERIMENT_NAME:?请先 export EXPERIMENT_NAME=PixDDTv2_4}"
 
-CKPT_DIR="/data/zhangchi/ckpts/PixDDTv2/${EXPERIMENT_NAME}/checkpoints"
+CKPT_DIR="/data/shihaoyang/ckpts/PixDDTv2/${EXPERIMENT_NAME}/checkpoints"
 
-cd ~/RAE
+cd /home/shihaoyang/RAE
 
-export CUDA_VISIBLE_DEVICES=4,5,6,7
+export CUDA_VISIBLE_DEVICES=0,1,2,3
 
 while true; do
     torchrun --standalone --nnodes=1 --nproc_per_node=4 \
         src/train_stage3.py \
-        --config ~/RAE/configs/stage2/training/PixelDDTv2_small_dev.yaml \
+        --config /home/shihaoyang/RAE/configs/stage2/training/PixelDDTv2.yaml \
         --data-path /data/shihaoyang/data/imagenet/256/train \
-        --results-dir /data/zhangchi/ckpts/PixDDTv2 \
+        --results-dir /data/shihaoyang/ckpts/PixDDTv2 \
         --precision fp32 \
         --compile \
         --wandb \
-        2>&1 | tee ~/RAE/train_full.log
+        2>&1 | tee -a /home/shihaoyang/RAE/train_full.log
 
     rc=${PIPESTATUS[0]}
 
