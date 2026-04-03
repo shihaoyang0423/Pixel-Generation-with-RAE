@@ -175,6 +175,7 @@ class Transport:
                     (x1.shape[0],), mu=mu, sigma=sigma, low=t0, high=t1
                 )
                 # print('LOGITNORMAL IS CALLED')
+                
             else:
                 raise NotImplementedError(f"Unknown time distribution type {self.time_dist_type}")
 

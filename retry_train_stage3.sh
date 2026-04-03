@@ -14,7 +14,7 @@
 #   Ctrl-C    → 停止脚本
 
 export PATH="~/miniconda3/envs/rae/bin:$PATH"
-export EXPERIMENT_NAME="PixDDT_small_v2baseline"
+export EXPERIMENT_NAME="PixDDT_small_v2mask"
 
 CKPT_DIR="/data/zhangchi/ckpts/PixDDTv2/${EXPERIMENT_NAME}/checkpoints"
 
@@ -25,7 +25,7 @@ export CUDA_VISIBLE_DEVICES=4,5,6,7
 while true; do
     torchrun --standalone --nnodes=1 --nproc_per_node=4 \
         src/train_stage3.py \
-        --config ~/RAE/configs/stage2/training/PixelDDTv2_small_dev.yaml \
+        --config ~/RAE/configs/stage2/training/PixelDDTv2_small_mask.yaml \
         --data-path /data/shihaoyang/data/imagenet/256/train \
         --results-dir /data/zhangchi/ckpts/PixDDTv2 \
         --precision fp32 \
