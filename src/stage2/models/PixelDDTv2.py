@@ -251,6 +251,8 @@ class PixelDDT(nn.Module):
         # Pretrained DDT Config
         stage2_config: dict = None,
         stage2_ckpt: str = None,
+        use_lora: bool = False,
+        lora_rank: int = 4,
         # Designs
         mask_channel: str = False,
     ):
@@ -340,6 +342,23 @@ class PixelDDT(nn.Module):
         # Freeze DDT
         for p in self.ddt.parameters():
             p.requires_grad = False
+            
+        self.use_lora = use_lora
+        if use_lora:
+            print(f"Injecting LoRA into RAE DDT (rank={lora_rank})...")
+            from peft import LoraConfig, get_peft_model
+            lora_config = LoraConfig(
+                r=lora_rank,
+                lora_alpha=lora_rank,
+                target_modules=["qkv", "proj", "fc1", "fc2", "linear"],
+                lora_dropout=0.0,
+                bias="none"
+            )
+            self.ddt = get_peft_model(self.ddt, lora_config)
+            self.ddt.print_trainable_parameters()
+            
+            
+            
         self.ddt.eval()
         
 

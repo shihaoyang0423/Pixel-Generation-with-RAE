@@ -21,7 +21,7 @@ stage_2:
     patch_size: 16
     in_channels: 3
     hidden_size: 1152 #原768
-    # depth: 30
+    depth: 12
     num_heads: 16
     mlp_ratio: 4.0
     class_dropout_prob: 0.1
