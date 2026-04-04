@@ -13,7 +13,7 @@
 #   Ctrl-B D  → 退出 tmux 但脚本继续跑
 #   Ctrl-C    → 停止脚本
 
-export EXPERIMENT_NAME="${EXPERIMENT_NAME:?请先 export EXPERIMENT_NAME=PixDDTv2_4}"
+export EXPERIMENT_NAME="PixDDT_small_v2mask"
 
 CKPT_DIR="/data/shihaoyang/ckpts/PixDDTv2/${EXPERIMENT_NAME}/checkpoints"
 

@@ -653,12 +653,10 @@ def main():
     ema_model.eval()
     # model.requires_grad_(True) # Do NOT force unfreeze. Let model.__init__ decide what is frozen (e.g. DDT).
     model.train() # Set to train mode (Dropout, BatchNorm, etc.)
-    model.ddt.eval() # Keep frozen DDT in eval mode
     ddp_model = DDP(model, device_ids=[device.index], broadcast_buffers=False, find_unused_parameters=False)
     # ddp_model = torch.compile(ddp_model) # fix shape compile, see if it works
     model = ddp_model.module
     ddp_model.train()
-    model.ddt.eval()
     # no need to put RAE into DDP since it's frozen
     model_param_count = sum(p.numel() for p in model.parameters())
     logger.info(f"Model Parameters: {model_param_count/1e6:.2f}M")
@@ -809,7 +807,6 @@ def main():
     dist.barrier() 
     for epoch in range(start_epoch, num_epochs):
         model.train()
-        model.ddt.eval()
         sampler.set_epoch(epoch)
         epoch_metrics = defaultdict(lambda: torch.zeros(1, device=device))
         num_batches = 0
@@ -952,7 +949,6 @@ def main():
                         wandb_utils.log_image(decoded_rae, global_step, key="samples/rae", caption="RAE Stream Samples")
                 logger.info("Generating EMA samples done.")
                 model.train()
-                model.ddt.eval()
             if do_eval and (eval_interval > 0 and global_step % eval_interval == 0):
                 logger.warning("Evaluation disabled for PixelDDT dual-stream model pending refactor of evaluation pipeline.")
                 # logger.info("Starting evaluation...")

@@ -1,6 +1,6 @@
-export CUDA_VISIBLE_DEVICES=4,5,6,7
+export CUDA_VISIBLE_DEVICES=4
 export EXPERIMENT_NAME=dev
-torchrun --standalone --nnodes=1 --nproc_per_node=4 \
+torchrun --standalone --nnodes=1 --nproc_per_node=1 \
     src/train_stage3.py \
     --config ~/RAE/configs/stage2/training/PixelDDTv2.yaml \
     --data-path /data/shihaoyang/data/imagenet/256/train \

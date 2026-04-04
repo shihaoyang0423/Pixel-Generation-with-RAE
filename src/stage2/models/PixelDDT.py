@@ -251,6 +251,8 @@ class PixelDDT(nn.Module):
         # Pretrained DDT Config
         stage2_config: dict = None,
         stage2_ckpt: str = None,
+        use_lora: bool = False,
+        lora_rank: int = 4,
     ):
         super().__init__()
         self.in_channels = in_channels
@@ -332,6 +334,23 @@ class PixelDDT(nn.Module):
         # Freeze DDT
         for p in self.ddt.parameters():
             p.requires_grad = False
+            
+        self.use_lora = use_lora
+        if use_lora:
+            print(f"Injecting LoRA into RAE DDT (rank={lora_rank})...")
+            from peft import LoraConfig, get_peft_model
+            lora_config = LoraConfig(
+                r=lora_rank,
+                lora_alpha=lora_rank,
+                target_modules=["qkv", "proj", "fc1", "fc2", "linear"],
+                lora_dropout=0.0,
+                bias="none"
+            )
+            self.ddt = get_peft_model(self.ddt, lora_config)
+            self.ddt.print_trainable_parameters()
+            
+            
+            
         self.ddt.eval()
 
     def train(self, mode: bool = True):
@@ -340,7 +359,14 @@ class PixelDDT(nn.Module):
         This prevents dropout/stat updates in DDT during both training and inference.
         """
         super().train(mode)
-        self.ddt.eval()
+        if getattr(self, "use_lora", False):
+            # PEFT model has train() method that only affects the adapters (or drops if configured).
+            # But the underlying base model might also be switched to train.
+            # To be safe and strictly keep DDT frozen behavior but train LoRA:
+            self.ddt.eval()
+            self.ddt.train(mode) # PEFT model handles this mostly, but let's just train adapters manually
+        else:
+            self.ddt.eval()
         return self
         
 

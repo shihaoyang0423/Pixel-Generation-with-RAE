@@ -251,6 +251,10 @@ class PixelDDT(nn.Module):
         # Pretrained DDT Config
         stage2_config: dict = None,
         stage2_ckpt: str = None,
+        use_lora: bool = False,
+        lora_rank: int = 4,
+        # Designs
+        mask_channel: str = False,
     ):
         super().__init__()
         self.in_channels = in_channels
@@ -260,6 +264,8 @@ class PixelDDT(nn.Module):
         self.num_heads = num_heads
         self.hidden_size = hidden_size
         self.input_size = input_size
+        
+        self.mask_channel = mask_channel
         
         # 1. Load Pretrained DDT (Frozen)
         if stage2_config is None:
@@ -336,6 +342,23 @@ class PixelDDT(nn.Module):
         # Freeze DDT
         for p in self.ddt.parameters():
             p.requires_grad = False
+            
+        self.use_lora = use_lora
+        if use_lora:
+            print(f"Injecting LoRA into RAE DDT (rank={lora_rank})...")
+            from peft import LoraConfig, get_peft_model
+            lora_config = LoraConfig(
+                r=lora_rank,
+                lora_alpha=lora_rank,
+                target_modules=["qkv", "proj", "fc1", "fc2", "linear"],
+                lora_dropout=0.0,
+                bias="none"
+            )
+            self.ddt = get_peft_model(self.ddt, lora_config)
+            self.ddt.print_trainable_parameters()
+            
+            
+            
         self.ddt.eval()
         
 
@@ -395,10 +418,47 @@ class PixelDDT(nn.Module):
         """
         if x_rae is None:
             raise ValueError("x_rae must be provided to guide the Pixel DiT and compute the RAE step.")
+        
+        if self.mask_channel and self.training:
+            p = 0.5               # Probability an image gets masked at all
+            p_two_channels = 0.5  # Probability of masking a 2nd channel (if already masking)
+            
+            device = x_pix.device
+            b, c, h, w = x_pix.shape    
+            
+            # 1. Create a boolean mask to decide WHICH batch items to modify
+            apply_mask = torch.rand(b, device=device) < p
+            batch_idx = torch.where(apply_mask)[0] # Get the actual indices
+            
+            # Only proceed if there's at least one image to mask
+            if batch_idx.numel() > 0:
+                n_mask = batch_idx.numel()
+                
+                # 2. Pick the first random channel to mask for the selected images
+                c1 = torch.randint(0, c, (n_mask,), device=device)
+                
+                if c > 1:
+                    # 3. Decide WHICH of these images get a 2nd channel masked
+                    mask_second = torch.rand(n_mask, device=device) < p_two_channels
+                    
+                    # To ensure the second channel is different, we add a random offset 
+                    # between 1 and (c-1), then use modulo arithmetic.
+                    offset = torch.randint(1, c, (n_mask,), device=device)
+                    
+                    # If mask_second is True, use the new channel. If False, just reuse c1.
+                    c2 = torch.where(mask_second, (c1 + offset) % c, c1)
+                    
+                    # Mask the second channel (if c1 == c2, it just overwrites 0 with 0 harmlessly)
+                    x_pix[batch_idx, c2, :, :] = 0.0
+
+                # Mask the first channel
+                x_pix[batch_idx, c1, :, :] = 0.0
+            
 
         # ==========================================
         # 1. Run Frozen RAE (DDT) & Complete its Forward
         # ==========================================
+        
         with torch.no_grad():
             t_ddt = self.ddt.t_embedder(t_rae)
             y_ddt = self.ddt.y_embedder(y, self.training)
