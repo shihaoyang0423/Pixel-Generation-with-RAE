@@ -258,7 +258,11 @@ def main(args: argparse.Namespace) -> None:
         return float(guidance_d.get(key.replace("_", "-"), default))
 
     t_min = _gval("t_min", 0.0)
+    if args.t_min is not None:
+        t_min = float(args.t_min)
     t_max = _gval("t_max", 1.0)
+    if args.t_max is not None:
+        t_max = float(args.t_max)
     using_cfg = guidance_scale > 1.0
 
     # if rank == 0:
@@ -418,6 +422,10 @@ if __name__ == "__main__":
                         help="'equal' ensures each class appears num_fid_samples/1000 times.")
     parser.add_argument("--cfg-scale", type=float, default=None,
                         help="Override CFG guidance scale from config.")
+    parser.add_argument("--t-min", type=float, default=None,
+                        help="Override CFG t_min (guidance applied when t >= t_min).")
+    parser.add_argument("--t-max", type=float, default=None,
+                        help="Override CFG t_max (guidance applied when t <= t_max).")
     parser.add_argument("--naive", action="store_true",
                         help="Use naive fixed-step Euler sampler (default: dopri5 adaptive ODE).")
 

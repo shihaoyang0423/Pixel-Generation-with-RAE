@@ -60,18 +60,18 @@ sampler:
   mode: ODE
   params:
     sampling_method: 'euler'
-    num_steps: 50
+    num_steps: 100 #原50
 
 sampler_rae:
   mode: ODE
   params:
     sampling_method: 'euler'
-    num_steps: 50
+    num_steps: 100 #原50
 
 guidance:
   method: 'cfg'
-  scale: 1.0
-  t_min: 0.0
+  scale: 2.5
+  t_min: 0.3
   t_max: 1.0
 
 misc:
