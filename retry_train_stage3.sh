@@ -13,18 +13,18 @@
 #   Ctrl-B D  → 退出 tmux 但脚本继续跑
 #   Ctrl-C    → 停止脚本
 
-export EXPERIMENT_NAME="PixDDT_small_v2mask"
+export EXPERIMENT_NAME="PixDDT_small_v2_lora_0.01"
 
 CKPT_DIR="/data/shihaoyang/ckpts/PixDDTv2/${EXPERIMENT_NAME}/checkpoints"
 
 cd /home/shihaoyang/RAE
 
-export CUDA_VISIBLE_DEVICES=0,1,2,3
+export CUDA_VISIBLE_DEVICES=4,5,6,7
 
 while true; do
     torchrun --standalone --nnodes=1 --nproc_per_node=4 \
         src/train_stage3.py \
-        --config /home/shihaoyang/RAE/configs/stage2/training/PixelDDTv2.yaml \
+        --config /home/shihaoyang/RAE/configs/stage2/training/PixelDDTv2_small_lora.yaml \
         --data-path /data/shihaoyang/data/imagenet/256/train \
         --results-dir /data/shihaoyang/ckpts/PixDDTv2 \
         --precision fp32 \

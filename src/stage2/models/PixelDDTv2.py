@@ -1,3 +1,4 @@
+import contextlib
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -456,10 +457,13 @@ class PixelDDT(nn.Module):
             
 
         # ==========================================
-        # 1. Run Frozen RAE (DDT) & Complete its Forward
+        # 1. Run RAE (DDT) & Complete its Forward
         # ==========================================
-        
-        with torch.no_grad():
+        # When use_lora=True, skip no_grad so LoRA adapter weights (requires_grad=True)
+        # can receive gradients. When use_lora=False, keep no_grad since DDT is fully
+        # frozen and gradient computation would be wasted work.
+        ddt_ctx = contextlib.nullcontext() if self.use_lora else torch.no_grad()
+        with ddt_ctx:
             t_ddt = self.ddt.t_embedder(t_rae)
             y_ddt = self.ddt.y_embedder(y, self.training)
             c_ddt = nn.functional.silu(t_ddt + y_ddt)

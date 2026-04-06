@@ -149,9 +149,9 @@ def joint_training_losses(model, x1_pix, x1_rae, transport_pix, transport_rae, m
                 return mean_flat(weight * ((pred * sigma_t + x0) ** 2))
 
     loss_pix = compute_stream_loss(transport_pix, model_output_pix, ut_pix, xt_pix, x0_pix, t_pix)
-    # loss_rae = compute_stream_loss(transport_rae, model_output_rae, ut_rae, xt_rae, x0_rae, t_rae)
-    
-    return loss_pix #, loss_rae
+    loss_rae = compute_stream_loss(transport_rae, model_output_rae, ut_rae, xt_rae, x0_rae, t_rae)
+
+    return loss_pix, loss_rae
 
 @torch.no_grad()
 def joint_sample_ode(
@@ -578,7 +578,8 @@ def main():
     checkpoint_interval = int(training_cfg.get("checkpoint_interval", 4)) # ckpt interval is epoch based
     cfg_scale_override = training_cfg.get("cfg_scale", None)
     default_seed = int(training_cfg.get("global_seed", 0))
-    
+    rae_loss_weight = float(training_cfg.get("rae_loss_weight", 0.0))
+
     if eval_config:
         """
         FID online evaluation setup
@@ -736,6 +737,8 @@ def main():
     
     log_steps = 0
     running_loss = 0.0
+    running_loss_pix = 0.0
+    running_loss_rae_w = 0.0
     start_time = time()
     use_guidance = guidance_scale > 1.0
     zs = torch.randn(micro_batch_size, *latent_size, device=device, dtype=torch.float32) # always use float for noise sampling
@@ -780,6 +783,27 @@ def main():
                 scheduler,
             )
             logger.info(f"[Rank {rank}] Resumed from {ckpt_path} (epoch={start_epoch}, step={global_step}).")
+            # scheduler.load_state_dict() restores base_lrs from the checkpoint, which may
+            # differ from the current config (e.g. when lr is changed between runs).
+            # Force base_lrs to match the current config and recompute the effective lr.
+            if scheduler is not None:
+                sched_cfg_cur = dict(training_cfg.get("scheduler", {}))
+                opt_cfg_cur = dict(training_cfg.get("optimizer", {}))
+                config_base_lr = float(
+                    sched_cfg_cur.get("base_lr",
+                    opt_cfg_cur.get("lr",
+                    scheduler.base_lrs[0]))
+                )
+                if abs(scheduler.base_lrs[0] - config_base_lr) > 1e-12:
+                    logger.info(
+                        f"[Rank {rank}] Scheduler base_lr overridden after resume: "
+                        f"{scheduler.base_lrs[0]:.2e} -> {config_base_lr:.2e} (config changed since checkpoint)"
+                    )
+                scheduler.base_lrs = [config_base_lr] * len(scheduler.base_lrs)
+                current_lrs = scheduler.get_lr()
+                for param_group, lr in zip(optimizer.param_groups, current_lrs):
+                    param_group["lr"] = lr
+                scheduler._last_lr = list(current_lrs)
         else:
             raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
     else:
@@ -807,6 +831,7 @@ def main():
     dist.barrier() 
     for epoch in range(start_epoch, num_epochs):
         model.train()
+        model.ddt.eval()  # keep frozen DDT backbone in eval mode after model.train() overrides it
         sampler.set_epoch(epoch)
         epoch_metrics = defaultdict(lambda: torch.zeros(1, device=device))
         num_batches = 0
@@ -839,7 +864,7 @@ def main():
             model_kwargs = dict(y=labels)
             
             with autocast(**autocast_kwargs):
-                loss_pix = joint_training_losses(
+                loss_pix, loss_rae = joint_training_losses(
                     ddp_model, 
                     x_pix, 
                     x_rae, 
@@ -847,7 +872,7 @@ def main():
                     transport_rae, 
                     model_kwargs
                 )
-                loss = loss_pix.mean()
+                loss = loss_pix.mean() + rae_loss_weight * loss_rae.mean()
                 if torch.isnan(loss):
                     print(f"[ERROR] NaN loss detected at epoch {epoch} step {global_step}. Exiting.", flush=True)
                     sys.exit(1)
@@ -871,8 +896,11 @@ def main():
                     scheduler.step()
                 update_ema(ema_model, ddp_model.module, decay=ema_decay)
             running_loss += loss.item()
+            running_loss_pix += loss_pix.mean().item()
+            running_loss_rae_w += (rae_loss_weight * loss_rae).mean().item()
             epoch_metrics['loss'] += loss.detach()
             epoch_metrics['loss_pix'] += loss_pix.mean().detach()
+            epoch_metrics['loss_rae'] += loss_rae.mean().detach()
             
             if log_interval > 0 and global_step % log_interval == 0 and rank == 0:
                 avg_loss = running_loss / log_interval # flow loss often has large variance so we record avg loss
@@ -881,6 +909,9 @@ def main():
                     "train/loss": avg_loss, 
                     "train/lr": optimizer.param_groups[0]["lr"],
                 }
+                if rae_loss_weight > 0:
+                    stats["train/loss_pix"] = running_loss_pix / log_interval
+                    stats["train/loss_rae_w"] = running_loss_rae_w / log_interval
                 logger.info(
                     f"[Epoch {epoch} | Step {global_step}] "
                     + ", ".join(f"{k}: {v:.4f}" for k, v in stats.items())
@@ -891,6 +922,8 @@ def main():
                         step=global_step,
                     )
                 running_loss = 0.0
+                running_loss_pix = 0.0
+                running_loss_rae_w = 0.0
             if global_step % sample_every == 0:
                 model.eval()
                 logger.info("Generating EMA samples...")
@@ -949,6 +982,7 @@ def main():
                         wandb_utils.log_image(decoded_rae, global_step, key="samples/rae", caption="RAE Stream Samples")
                 logger.info("Generating EMA samples done.")
                 model.train()
+                model.ddt.eval()  # restore eval mode for frozen DDT backbone
             if do_eval and (eval_interval > 0 and global_step % eval_interval == 0):
                 logger.warning("Evaluation disabled for PixelDDT dual-stream model pending refactor of evaluation pipeline.")
                 # logger.info("Starting evaluation...")
