@@ -10,10 +10,12 @@ Extends PixelDDTv2_project.py with configurable per-layer RAE injection:
       Controls whether DDTFinalLayer also receives RAE conditioning,
       independently of rae_inject_layers.
 
-For blocks NOT in rae_inject_layers, conditioning falls back to t_pix only
-(s_trans_t_only = s_projector(silu(t_pix_broadcast))).
+For blocks NOT in rae_inject_layers, conditioning falls back to t_pix + y_embed
+(s_trans_t_only = s_projector(silu(t_pix_broadcast + y_broadcast))), consistent
+with standard DiT which always conditions on both time and class label.
 For blocks IN rae_inject_layers (or when rae_inject_layers is None), conditioning
-uses full RAE features (s_trans_rae = s_projector(silu(t_pix_broadcast + s_clean))).
+uses full RAE features (s_trans_rae = s_projector(silu(t_pix_broadcast + s_clean)));
+s_clean is assumed to already encode class-level semantics so y is not added separately.
 
 All other architecture, training, and inference logic is identical to
 PixelDDTv2_project.py.
@@ -200,6 +202,7 @@ class PixelDDT(nn.Module):
         self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, hidden_size), requires_grad=False)
 
         self.t_embedder = GaussianFourierEmbedding(self.ddt.encoder_hidden_size)
+        self.y_embedder = LabelEmbedder(num_classes, self.ddt.encoder_hidden_size, class_dropout_prob)
 
         self.blocks = nn.ModuleList([
             LightningDDTBlock(
@@ -283,6 +286,7 @@ class PixelDDT(nn.Module):
 
         nn.init.normal_(self.t_embedder.mlp[0].weight, std=0.02)
         nn.init.normal_(self.t_embedder.mlp[2].weight, std=0.02)
+        nn.init.normal_(self.y_embedder.embedding_table.weight, std=0.02)
 
         nn.init.constant_(self.final_layer.adaLN_modulation[-1].weight, 0)
         nn.init.constant_(self.final_layer.adaLN_modulation[-1].bias, 0)
@@ -444,22 +448,24 @@ class PixelDDT(nn.Module):
 
         x_pix_emb = self.x_embedder(x_pix) + self.pos_embed
 
-        t_pix_emb = self.t_embedder(t_pix)
+        t_pix_emb = self.t_embedder(t_pix)                          # [B, enc_hidden]
+        y_emb     = self.y_embedder(y, self.training)                # [B, enc_hidden]
 
-        # pixel_only fast path: no RAE conditioning, s_clean is not needed
+        # pixel_only fast path: no RAE conditioning, use t+y like standard DiT
         if s_clean is None:
-            c_t = self.s_projector(nn.functional.silu(t_pix_emb))  # [B, hidden_size]
+            c_ty = self.s_projector(nn.functional.silu(t_pix_emb + y_emb))  # [B, hidden_size]
             for i in range(self.depth):
-                x_pix_emb = self.blocks[i](x_pix_emb, c_t, feat_rope=self.feat_rope)
-            x_pix_emb = self.final_layer(x_pix_emb, c_t)
+                x_pix_emb = self.blocks[i](x_pix_emb, c_ty, feat_rope=self.feat_rope)
+            x_pix_emb = self.final_layer(x_pix_emb, c_ty)
             return self.unpatchify(x_pix_emb)
 
         # Pre-compute both conditioning variants.
         t_pix_broadcast = t_pix_emb.unsqueeze(1).repeat(1, s_clean.shape[1], 1)
-        # Full RAE injection: t_pix + s_clean
+        # Full RAE injection: t_pix + s_clean (s already encodes class info)
         s_trans_rae    = self.s_projector(nn.functional.silu(t_pix_broadcast + s_clean))
-        # t-only fallback: no s_clean contribution
-        s_trans_t_only = self.s_projector(nn.functional.silu(t_pix_broadcast))
+        # t+y fallback for non-injected layers: standard DiT-style conditioning
+        ty_broadcast   = (t_pix_emb + y_emb).unsqueeze(1).repeat(1, s_clean.shape[1], 1)
+        s_trans_t_only = self.s_projector(nn.functional.silu(ty_broadcast))
 
         for i in range(self.depth):
             if self._inject_set is None or i in self._inject_set:
