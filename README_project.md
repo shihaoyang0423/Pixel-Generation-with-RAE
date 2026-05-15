@@ -536,3 +536,128 @@ huggingface-cli download <repo_id> --local-dir <本地目录>
 ```
 
 具体需要下载的模型和路径见 `RAEDME.md` （RAE repo 的 README 文档）的 `Download Pre-trained Models` 部分。
+
+---
+
+## 十五、Git 协作流程
+
+### 分支规范
+
+```
+main                        ← 稳定公共代码，只接受合并，不直接在这里改
+├── 名字/实验描述         ← 实验分支，例如 Haoyang/direct-inject
+└── 名字/实验描述         ← 实验分支，例如 Xiuyuan/new-arch
+```
+
+每人在自己的分支上独立工作，互不干扰。想把某个实验的改动共享给对方，才合并到 `main`。
+
+---
+
+### 开始一个新实验（每次都这样做）
+
+```bash
+# 进入仓库目录（你的路径可能是 ~/Pixel-Generation-with-RAE ，建议将 Pixel-Generation-with-RAE/ 文件名改为 RAE/）
+cd ~/RAE   # 或者 cd ~/Pixel-Generation-with-RAE
+
+# 先把 main 更新到最新
+git checkout main
+git pull origin main
+
+# 从最新的 main 开一个自己的实验分支
+git checkout -b 你的名字/实验描述   # 例如：git checkout -b Xiuyuan/direct_injection
+```
+
+---
+
+### 日常保存进度
+
+```bash
+# 查看改了哪些文件
+git status
+
+# 把所有改动加进暂存区（或只加某个文件：git add 文件路径）
+git add .
+
+# 写一条 commit，描述你做了什么
+git commit -m "简短描述，例如：try direct injection with 2-layer projector"
+
+# 推送到远端（第一次推新分支需要 -u，之后直接 git push 即可）
+git push -u origin 你的分支名
+```
+
+> **什么时候 commit？** 不需要等实验跑完再 commit。改了代码就 commit 一次，这样万一改坏了可以随时回退。commit 要频繁、粒度小。
+
+---
+
+### 拿到队友的最新代码
+
+```bash
+# 更新远端信息
+git fetch origin
+
+# 方式一：把队友的分支直接拉下来看（只读，不改动自己的分支）
+git checkout origin/队友的分支名
+
+# 方式二：把 main 上的最新公共代码合并到你当前的实验分支
+git checkout 你的分支名
+git merge main
+# 如果有冲突，git 会提示哪些文件冲突，打开文件找到 <<<< ==== >>>> 标记，
+# 手动选择保留哪一方的代码，改完后：
+git add .
+git commit -m "merge main into 你的分支名"
+```
+
+---
+
+### 把自己的实验成果共享到 main（让队友也能用）
+
+```bash
+# 先确保自己的分支是最新的
+git checkout 你的分支名
+git push origin 你的分支名
+
+# 切回 main，拉最新
+git checkout main
+git pull origin main
+
+# 合并自己的分支
+git merge 你的分支名
+
+# 推送到远端
+git push origin main
+```
+
+合并前两人最好口头确认一下，避免同时往 main 合并造成冲突。
+
+---
+
+### 万一改坏了，回退代码
+
+```bash
+# 查看最近的提交记录，找到你想回退到的那一条的 commit hash（前7位即可）
+git log --oneline -10
+
+# 方式一：软回退（代码改动保留，只是撤销 commit）
+git reset --soft HEAD~1        # 撤销最近1次 commit
+git reset --soft 某个commit的hash
+
+# 方式二：硬回退（彻底恢复到那个版本，之后的改动全丢）
+git reset --hard 某个commit的hash
+```
+
+---
+
+### 不会被提交的东西
+
+以下内容已经在 `.gitignore` 里忽略，不会被提交：
+
+| 类型 | 举例 |
+|------|------|
+| 训练日志 | `*.log` |
+| 模型权重 | `*.pth`、`checkpoints/` |
+| 数据集 | `data/`、`/data/` |
+| 采样结果 | `ckpts/` |
+| IDE 缓存 | `.cursor/` |
+| 论文 PDF | `*.pdf` |
+
+如果你发现 `git status` 里出现了上面这些文件，说明 `.gitignore` 没有生效，**不要 `git add .`**，先检查原因再操作。
