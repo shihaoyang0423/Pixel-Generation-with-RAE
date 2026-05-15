@@ -101,28 +101,12 @@ def project_training_losses(model, x1_pix, x1_rae, transport_pix, transport_rae,
       - model.forward() receives x1_rae (clean) so it can extract clean
         conditioning features at t=0 (simulating post-RAE-ODE state).
       - DATA loss branch has NO sigma_t clamp.
+
+    When model.pixel_only is True, the RAE stream is skipped entirely:
+      - No transport sampling for RAE.
+      - No rae.encode() call (should be skipped upstream in training loop).
+      - Returns (loss_pix, zeros) — RAE loss is identically zero.
     """
-    # 1. Sample t and noise for Pixel stream (independent)
-    t_pix, x0_pix, _, _ = transport_pix.sample(x1_pix)
-
-    # 2. Sample t and noise for RAE stream (independent — no shared t_ori)
-    t_rae, x0_rae, _, _ = transport_rae.sample(x1_rae)
-
-    # 3. Interpolate to get noisy inputs
-    _, xt_pix, ut_pix = transport_pix.path_sampler.plan(t_pix, x0_pix, x1_pix)
-    _, xt_rae, ut_rae = transport_rae.path_sampler.plan(t_rae, x0_rae, x1_rae)
-
-    # 4. Model forward — passes x1_rae for clean conditioning
-    model_output_pix, model_output_rae = model(
-        x_pix=xt_pix,
-        x_rae=xt_rae,
-        t_pix=t_pix,
-        t_rae=t_rae,
-        x1_rae=x1_rae,   # clean RAE for pixel conditioning (Phase 2 simulation)
-        **model_kwargs
-    )
-
-    # 5. Compute losses (DATA branch: no sigma_t clamp)
     def compute_stream_loss(trans, pred, target, xt, x0, t):
         if trans.model_type == ModelType.VELOCITY:
             return mean_flat(((pred - target) ** 2))
@@ -150,6 +134,34 @@ def project_training_losses(model, x1_pix, x1_rae, transport_pix, transport_rae,
             else:
                 return mean_flat(weight * ((pred * sigma_t + x0) ** 2))
 
+    # 1. Sample t and noise for Pixel stream (always)
+    t_pix, x0_pix, _, _ = transport_pix.sample(x1_pix)
+    _, xt_pix, ut_pix = transport_pix.path_sampler.plan(t_pix, x0_pix, x1_pix)
+
+    raw_model = getattr(model, 'module', model)
+    if getattr(raw_model, 'pixel_only', False):
+        # pixel_only: skip RAE transport sampling and RAE forward entirely
+        model_output_pix, _ = model(x_pix=xt_pix, t_pix=t_pix, **model_kwargs)
+        loss_pix = compute_stream_loss(transport_pix, model_output_pix, ut_pix, xt_pix, x0_pix, t_pix)
+        return loss_pix, torch.zeros(1, device=x1_pix.device, dtype=x1_pix.dtype)
+
+    # 2. Sample t and noise for RAE stream (independent — no shared t_ori)
+    t_rae, x0_rae, _, _ = transport_rae.sample(x1_rae)
+
+    # 3. Interpolate to get noisy inputs
+    _, xt_rae, ut_rae = transport_rae.path_sampler.plan(t_rae, x0_rae, x1_rae)
+
+    # 4. Model forward — passes x1_rae for clean conditioning
+    model_output_pix, model_output_rae = model(
+        x_pix=xt_pix,
+        x_rae=xt_rae,
+        t_pix=t_pix,
+        t_rae=t_rae,
+        x1_rae=x1_rae,   # clean RAE for pixel conditioning (Phase 2 simulation)
+        **model_kwargs
+    )
+
+    # 5. Compute losses
     loss_pix = compute_stream_loss(transport_pix, model_output_pix, ut_pix, xt_pix, x0_pix, t_pix)
     loss_rae = compute_stream_loss(transport_rae, model_output_rae, ut_rae, xt_rae, x0_rae, t_rae)
 
@@ -197,6 +209,31 @@ def project_sample_ode_naive(
     def get_dt_ds(s, shift):
         denom = 1 + (shift - 1) * s
         return shift / (denom ** 2)
+
+    # pixel_only mode: skip Phase 1 (RAE ODE) and Phase 2 (extract_clean_s)
+    if getattr(model, 'pixel_only', False):
+        t0_pix, t1_pix = transport_pix.check_interval(transport_pix.train_eps, transport_pix.sample_eps, eval=True)
+        ss_pix = 1.0 - torch.linspace(t0_pix, t1_pix, num_steps + 1, device=device)
+        x_pix = z_pix.detach().clone()
+        for i in range(num_steps):
+            s_curr = ss_pix[i]
+            s_next = ss_pix[i + 1]
+            ds = s_next - s_curr
+            t_pix_scalar = get_t(s_curr, transport_pix.time_dist_shift)
+            t_pix_batch = t_pix_scalar.repeat(B_full)
+            dt_ds_pix = get_dt_ds(s_curr, transport_pix.time_dist_shift)
+            if using_cfg:
+                model_out_pix = model.forward_pix_with_cfg(
+                    x_pix, t_pix_batch, y, None,
+                    cfg_scale=cfg_scale, cfg_interval=cfg_interval
+                )
+            else:
+                model_out_pix = model.forward_pix(x_pix, t_pix_batch, y, None)
+            drift_pix_dt = compute_ode_drift(transport_pix, x_pix, t_pix_batch, model_out_pix)
+            x_pix = x_pix + drift_pix_dt * (dt_ds_pix * ds)
+            if verbose and (i == 0 or i == num_steps - 1 or i % 10 == 0):
+                print(f"[Pix pixel_only] step {i} | s={s_curr:.4f} t_pix={t_pix_scalar.item():.4f}")
+        return x_pix, None
 
     # -----------------------------------------------------------------------
     # Phase 1: RAE ODE — forward_rae (or forward_rae_with_cfg)
@@ -649,12 +686,16 @@ def main():
         for step, (images, labels) in enumerate(loader):
             images = images.to(device)
             labels = labels.to(device)
-            with torch.no_grad():
-                z = rae.encode(images)
+            # Skip RAE encoding entirely in pixel_only mode
+            if not model.pixel_only:
+                with torch.no_grad():
+                    z = rae.encode(images)
+                x_rae = z
+            else:
+                x_rae = None
 
             # Pixel input: [0, 1] range (no 2x-1 normalisation — project baseline)
             x_pix = images
-            x_rae = z
 
             optimizer.zero_grad(set_to_none=True)
             model_kwargs = dict(y=labels)
@@ -748,23 +789,24 @@ def main():
                     )
 
                     samples_pix = samples_pix.float()
-                    samples_rae = samples_rae.float()
 
                     if use_guidance:
                         samples_pix, _ = samples_pix.chunk(2, dim=0)
-                        samples_rae, _ = samples_rae.chunk(2, dim=0)
 
                     # [0, 1] range — just clamp (no (x+1)/2 shift)
                     samples = samples_pix.cpu().float().clamp(0, 1)
-
-                    decoded_rae = rae.decode(samples_rae)
-                    decoded_rae = decoded_rae.cpu().float().clamp(0, 1)
 
                     dist.barrier()
                     print(f"Rank{rank}")
                     if args.wandb and rank == 0:
                         wandb_utils.log_image(samples, global_step, key="samples/pixel", caption="Pixel Stream Samples")
-                        wandb_utils.log_image(decoded_rae, global_step, key="samples/rae", caption="RAE Stream Samples")
+                        if samples_rae is not None:
+                            samples_rae = samples_rae.float()
+                            if use_guidance:
+                                samples_rae, _ = samples_rae.chunk(2, dim=0)
+                            decoded_rae = rae.decode(samples_rae)
+                            decoded_rae = decoded_rae.cpu().float().clamp(0, 1)
+                            wandb_utils.log_image(decoded_rae, global_step, key="samples/rae", caption="RAE Stream Samples")
                 logger.info("EMA sample generation done.")
                 model.train()
                 model.ddt.eval()

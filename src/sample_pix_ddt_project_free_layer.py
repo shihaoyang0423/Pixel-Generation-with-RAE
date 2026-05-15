@@ -53,8 +53,9 @@ from utils.train_utils import parse_configs
 from stage2.models import Stage2ModelProtocol
 from stage2.transport import create_transport
 
-# Import project-specific sequential sampler from train_stage3_projcet
-from train_stage3_projcet import project_sample_ode_naive  # noqa: E402
+# Import project-specific sequential sampler from the free_layer training script
+# (supports pixel_only mode — skips Phase 1 & 2 when rae_inject_layers=[] and rae_inject_final_layer=False)
+from train_stage3_projcet_free_layer import project_sample_ode_naive  # noqa: E402
 
 
 # ---------------------------------------------------------------------------

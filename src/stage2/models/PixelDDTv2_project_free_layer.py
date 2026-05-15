@@ -186,7 +186,8 @@ class PixelDDT(nn.Module):
         self.use_direct_rae_injection = use_direct_rae_injection
         print(f"[PixelDDT free_layer] rae_inject_layers={rae_inject_layers}, "
               f"rae_inject_final_layer={rae_inject_final_layer}, "
-              f"use_direct_rae_injection={use_direct_rae_injection}")
+              f"use_direct_rae_injection={use_direct_rae_injection}, "
+              f"pixel_only={self._inject_set is not None and len(self._inject_set) == 0 and not rae_inject_final_layer}")
 
         if stage2_config is None:
             raise ValueError("stage2_config must be provided for PixelDDT")
@@ -287,6 +288,17 @@ class PixelDDT(nn.Module):
         nn.init.constant_(self.final_layer.adaLN_modulation[-1].bias, 0)
         nn.init.constant_(self.final_layer.linear.weight, 0)
         nn.init.constant_(self.final_layer.linear.bias, 0)
+
+    # ------------------------------------------------------------------
+    # Pixel-only mode flag
+    # ------------------------------------------------------------------
+
+    @property
+    def pixel_only(self) -> bool:
+        """True when no RAE conditioning is injected anywhere (inject_set empty + final_layer off)."""
+        return (self._inject_set is not None
+                and len(self._inject_set) == 0
+                and not self.rae_inject_final_layer)
 
     # ------------------------------------------------------------------
     # Utility
@@ -434,6 +446,14 @@ class PixelDDT(nn.Module):
 
         t_pix_emb = self.t_embedder(t_pix)
 
+        # pixel_only fast path: no RAE conditioning, s_clean is not needed
+        if s_clean is None:
+            c_t = self.s_projector(nn.functional.silu(t_pix_emb))  # [B, hidden_size]
+            for i in range(self.depth):
+                x_pix_emb = self.blocks[i](x_pix_emb, c_t, feat_rope=self.feat_rope)
+            x_pix_emb = self.final_layer(x_pix_emb, c_t)
+            return self.unpatchify(x_pix_emb)
+
         # Pre-compute both conditioning variants.
         t_pix_broadcast = t_pix_emb.unsqueeze(1).repeat(1, s_clean.shape[1], 1)
         # Full RAE injection: t_pix + s_clean
@@ -456,22 +476,27 @@ class PixelDDT(nn.Module):
     # Training forward — both streams, clean conditioning for pixel
     # ------------------------------------------------------------------
 
-    def forward(self, x_pix, x_rae, t_pix, t_rae, y, x1_rae):
+    def forward(self, x_pix, x_rae=None, t_pix=None, t_rae=None, y=None, x1_rae=None):
         """
         Training forward pass.
 
         x_pix  : noisy pixel at t_pix  [B, 3, H, W]
-        x_rae  : noisy RAE   at t_rae  [B, C_rae, H_rae, W_rae]
+        x_rae  : noisy RAE   at t_rae  [B, C_rae, H_rae, W_rae]  (unused when pixel_only)
         t_pix  : pixel timestep        [B]
-        t_rae  : RAE timestep          [B]
+        t_rae  : RAE timestep          [B]                         (unused when pixel_only)
         y      : class labels          [B]
-        x1_rae : CLEAN RAE latent      [B, C_rae, H_rae, W_rae]
+        x1_rae : CLEAN RAE latent      [B, C_rae, H_rae, W_rae]  (unused when pixel_only)
                  Used to extract conditioning features at t=0 (Phase 2 simulation).
 
         Returns (imgs_out, x_rae_out):
           imgs_out  — pixel velocity prediction (for pixel loss)
-          x_rae_out — RAE  velocity prediction  (for RAE   loss)
+          x_rae_out — RAE  velocity prediction  (for RAE loss; zeros tensor when pixel_only)
         """
+        # pixel_only fast path: skip RAE encoder and denoising entirely
+        if self.pixel_only:
+            imgs_out = self.forward_pix(x_pix, t_pix, y, s_clean=None)
+            return imgs_out, torch.zeros(1, device=x_pix.device, dtype=x_pix.dtype)
+
         # 1. Extract clean conditioning features from x1_rae at t=0
         s_clean = self._extract_clean_s(x1_rae, y)
 

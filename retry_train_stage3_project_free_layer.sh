@@ -15,20 +15,34 @@
 
 export CUDA_VISIBLE_DEVICES=4,5,6,7  # 记得check
 
-export EXPERIMENT_NAME="PixDDT_small_v2_project_free_layer_2_false_logit_normal_0.8_0.8_pix_ts_1_wo_lora_w_qknorm"  # 记得check
+export EXPERIMENT_NAME="PixDDT_small_v2_project_free_layer_[]_false_logit_normal_0.8_0.8_pix_ts_1_wo_lora"  # 记得check
 
 CKPT_DIR="/home/shihaoyang/data/ckpts/PixDDTv2/${EXPERIMENT_NAME}/checkpoints"
 
 cd /home/shihaoyang/RAE
+RAE_ROOT="/home/shihaoyang/RAE"
+RAE_SRC="${RAE_ROOT}/src"
 
-# 启动时快照两份 YAML；本脚本整段生命周期（含 while 内重启）只用副本，可随时改仓库里的原文件。
-_CONFIG_SNAP_DIR=$(mktemp -d /tmp/retry_train_stage3_proj_fl.XXXXXX)
-TRAIN_CONFIG="${_CONFIG_SNAP_DIR}/PixelDDTv2_small_lora_project_free_layer.yaml"
-SAMPLE_CONFIG="${_CONFIG_SNAP_DIR}/PixDDT_small_v2_lora_project_free_layer.yaml"
-cp -- "/home/shihaoyang/RAE/configs/stage2/training/PixelDDTv2_small_lora_project_free_layer.yaml" "${TRAIN_CONFIG}"
-cp -- "/home/shihaoyang/RAE/configs/stage2/sampling/ImageNet256/PixDDT_small_v2_lora_project_free_layer.yaml" "${SAMPLE_CONFIG}"
+# 启动时快照 YAML + 关键 Python；本脚本整段生命周期（含 while 内重启、FID）只用副本，
+# 可随时改仓库里的原文件，不会影响当前实验。
+_SNAP_DIR=$(mktemp -d /tmp/retry_train_stage3_proj_fl.XXXXXX)
+TRAIN_CONFIG="${_SNAP_DIR}/PixelDDTv2_small_lora_project_free_layer.yaml"
+SAMPLE_CONFIG="${_SNAP_DIR}/PixDDT_small_v2_lora_project_free_layer.yaml"
+cp -- "${RAE_ROOT}/configs/stage2/training/PixelDDTv2_small_lora_project_free_layer.yaml" "${TRAIN_CONFIG}"
+cp -- "${RAE_ROOT}/configs/stage2/sampling/ImageNet256/PixDDT_small_v2_lora_project_free_layer.yaml" "${SAMPLE_CONFIG}"
 
-export CUDA_VISIBLE_DEVICES=4,5,6,7  # 记得check
+_SNAPSHOT_SRC="${_SNAP_DIR}/src"
+mkdir -p "${_SNAPSHOT_SRC}"
+cp -- "${RAE_SRC}/train_stage3_projcet_free_layer.py" "${_SNAPSHOT_SRC}/"
+cp -- "${RAE_SRC}/sample_pix_ddt_project_free_layer.py" "${_SNAPSHOT_SRC}/"
+cp -- "${RAE_SRC}/stage2/models/PixelDDTv2_project_free_layer.py" "${_SNAPSHOT_SRC}/PixelDDTv2_project_free_layer.py"
+cp -- "${RAE_ROOT}/scripts/retry_snap_bootstrap.py" "${_SNAPSHOT_SRC}/_retry_snap_bootstrap.py"
+BOOTSTRAP_SCRIPT="${_SNAPSHOT_SRC}/_retry_snap_bootstrap.py"
+# 仅仓库路径在 PYTHONPATH；三个快照模块由 bootstrap 注入 sys.modules（避免残缺 stage2 包）
+export RAE_SRC RAE_ROOT
+export PYTHONPATH="${RAE_SRC}:${RAE_ROOT}:${PYTHONPATH:-}"
+echo "[snap] config+code frozen at: ${_SNAP_DIR}"
+
 NUM_GPUS=$(echo "${CUDA_VISIBLE_DEVICES}" | tr ',' '\n' | grep -c .)
 
 SAMPLE_DIR="${HOME}/data/samples/${EXPERIMENT_NAME}"
@@ -38,8 +52,8 @@ TRAIN_TEE_LOG="/home/shihaoyang/RAE/train_project_free_layer_${EXPERIMENT_NAME}.
 FID_TEE_LOG="/home/shihaoyang/RAE/train_project_free_layer_fid_${EXPERIMENT_NAME}.log"
 
 while true; do
-    torchrun --standalone --nnodes=1 --nproc_per_node=4 \
-        src/train_stage3_projcet_free_layer.py \
+    RETRY_SNAP_MODE=train torchrun --standalone --nnodes=1 --nproc_per_node=4 \
+        "${BOOTSTRAP_SCRIPT}" \
         --config "${TRAIN_CONFIG}" \
         --data-path /data/shihaoyang/data/imagenet/256/train \
         --results-dir /home/shihaoyang/data/ckpts/PixDDTv2 \
@@ -58,8 +72,8 @@ while true; do
         latest_10="${CKPT_DIR}/${ckpt_base}.pt"
         marker="${CKPT_DIR}/${ckpt_base}.fid_done"
         echo "[fid] Signal detected, evaluating checkpoint: ${latest_10}"
-        torchrun --standalone --nnodes=1 --nproc_per_node=${NUM_GPUS} \
-            src/sample_pix_ddt_project_free_layer.py \
+        RETRY_SNAP_MODE=sample torchrun --standalone --nnodes=1 --nproc_per_node=${NUM_GPUS} \
+            "${BOOTSTRAP_SCRIPT}" \
             --config "${SAMPLE_CONFIG}" \
             --ckpt "${latest_10}" \
             --sample-dir "${SAMPLE_DIR}" \
