@@ -509,6 +509,8 @@ class PixelDDT(nn.Module):
         
         t_pix_broadcast = t_pix.unsqueeze(1).repeat(1, s.shape[1], 1)
         s_trans = nn.functional.silu(t_pix_broadcast + s)
+        # y_broadcast = y_ddt.unsqueeze(1).repeat(1, s.shape[1], 1)
+        # s_trans = nn.functional.silu(t_pix_broadcast + s + y_broadcast)
         s_trans = self.s_projector(s_trans)
         # s_trans = self.s_projector(s)
         # t_pix_broadcast = t_pix.unsqueeze(1).repeat(1, s_trans.shape[1], 1)

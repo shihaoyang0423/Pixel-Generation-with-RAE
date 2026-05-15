@@ -1,12 +1,7 @@
 __pycache__
-wandb
-
-.DS_store
-/samples/
-/results/
-pretrained_models
-
 __pycache__/
+wandb
+.DS_Store
 *.pth
 .cache/
 /checkpoints/
@@ -16,5 +11,7 @@ upload_to_hf.py
 /data/
 /ckpts/
 data
-record.txt
-train_full.log
+*.log
+cursor*.md
+*.pdf
+.cursor/

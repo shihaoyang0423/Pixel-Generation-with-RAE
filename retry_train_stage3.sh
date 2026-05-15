@@ -13,13 +13,13 @@
 #   Ctrl-B D  → 退出 tmux 但脚本继续跑
 #   Ctrl-C    → 停止脚本
 
-export EXPERIMENT_NAME="PixDDT_small_v2_lora_0.01"
+export EXPERIMENT_NAME="PixDDT_small_v2"  # 记得check
 
 CKPT_DIR="/data/shihaoyang/ckpts/PixDDTv2/${EXPERIMENT_NAME}/checkpoints"
 
 cd /home/shihaoyang/RAE
 
-export CUDA_VISIBLE_DEVICES=4,5,6,7
+export CUDA_VISIBLE_DEVICES=4,5,6,7  # 记得check
 
 while true; do
     torchrun --standalone --nnodes=1 --nproc_per_node=4 \
@@ -30,7 +30,7 @@ while true; do
         --precision fp32 \
         --compile \
         --wandb \
-        2>&1 | tee -a /home/shihaoyang/RAE/train_full.log
+        2>&1 | tee -a /home/shihaoyang/RAE/train_full_2.log  # 记得check
 
     rc=${PIPESTATUS[0]}
 

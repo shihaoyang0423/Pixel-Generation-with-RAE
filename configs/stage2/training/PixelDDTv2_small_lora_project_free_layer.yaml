@@ -1,0 +1,137 @@
+stage_1:
+  target: stage1.RAE
+  params:
+    encoder_cls: 'Dinov2withNorm'
+    encoder_config_path: '/data/shihaoyang/pretrained/encoders/dinov2-with-registers-base'
+    encoder_input_size: 224
+    encoder_params:
+      dinov2_path: '/data/shihaoyang/pretrained/encoders/dinov2-with-registers-base'
+      normalize: true
+    decoder_config_path: 'configs/decoder/ViTXL'
+    pretrained_decoder_path: '/data/shihaoyang/pretrained/decoders/dinov2/wReg_base/ViTXL_n08/model.pt'
+    noise_tau: 0.0
+    reshape_to_2d: true
+    normalization_stat_path: '/data/shihaoyang/pretrained/stats/dinov2/wReg_base/imagenet1k/stat.pt'
+
+
+stage_2:
+  target: stage2.models.PixelDDTv2_project_free_layer.PixelDDT
+  params:
+    input_size: 256
+    patch_size: 16
+    in_channels: 3
+    hidden_size: 768      # check
+    depth: 6              # check
+    num_heads: 12         # check
+    mlp_ratio: 4.0
+    class_dropout_prob: 0.1
+    num_classes: 1000
+    # Pixel Head architecture switches (affect self.blocks and feat_rope, NOT the RAE backbone)
+    use_qknorm: true     # QK-Norm in Pixel Head attention; check
+    use_swiglu: true      # SwiGLU MLP in Pixel Head; check
+    use_rope: true        # RoPE in Pixel Head; check
+    use_rmsnorm: true     # RMSNorm in Pixel Head; check
+    # LoRA Configuration
+    use_lora: false       # check
+    lora_rank: 16         # check
+    # Configurable RAE injection layers.
+    # rae_inject_layers: null  → all 16 blocks injected (same as _project)
+    # rae_inject_layers: []    → no blocks injected
+    # rae_inject_layers: [0, 4, 8, 12]  → only those block indices
+    rae_inject_layers: [2]            # check
+    rae_inject_final_layer: false     # check
+    use_direct_rae_injection: false    # true → 跳过DDT编码器，直接用干净DINOv2特征注入
+    direct_rae_in_channels: 768       # x1_rae 的通道数 (DINOv2-base = 768)
+
+    stage2_ckpt: '/data/shihaoyang/pretrained/DiTs/Dinov2/wReg_base/ImageNet256/DiTDH-S_ep20/stage2_model.pt'
+    stage2_config:
+      input_size: 16
+      patch_size: 1
+      in_channels: 768
+      hidden_size: [384, 2048]
+      depth: [12, 2]
+      num_heads: [6, 16]
+      mlp_ratio: 4.0
+      class_dropout_prob: 0.1
+      num_classes: 1000
+      use_qknorm: false
+      use_swiglu: true
+      use_rope: true
+      use_rmsnorm: true
+      wo_shift: false
+      use_pos_embed: true
+
+transport:
+  params:
+    path_type: 'Linear'
+    prediction: 'data'
+    loss_weight: 'velocity'
+    time_dist_type: 'logit-normal_0.8_0.8'  # check
+
+transport_rae:
+  params:
+    path_type: 'Linear'
+    prediction: 'velocity'
+    loss_weight: null
+    time_dist_type: 'logit-normal_0_1'
+
+sampler:
+  mode: ODE
+  params:
+    sampling_method: 'euler'
+    num_steps: 50
+
+sampler_rae:
+  mode: ODE
+  params:
+    sampling_method: 'euler'
+    num_steps: 50
+
+guidance:
+  method: 'cfg'
+  scale: 1.0
+  t_min: 0.0
+  t_max: 1.0
+
+misc:
+  latent_size: [3, 256, 256]
+  num_classes: 1000
+  time_dist_shift_dim: 4096 # 16384, check
+  time_dist_shift_base: 4096
+
+misc_rae:
+  latent_size: [768, 16, 16]
+  num_classes: 1000
+  time_dist_shift_dim: 196608  # 16*16*768
+  time_dist_shift_base: 4096
+
+eval:
+  eval_interval: 25000
+  eval_model: true
+  data_path: '/data/shihaoyang/data/imagenet/256/val'
+  reference_npz_path: '/data/shihaoyang/data/VIRTUAL_imagenet256_labeled.npz'
+
+
+training:
+  epochs: 1400
+  global_batch_size: 256     # check
+  grad_accum_steps: 1
+  ema_decay: 0.9999
+  num_workers: 16
+  log_interval: 10
+  checkpoint_interval: 1
+  sample_every: 2000
+  clip_grad: 1.0
+  global_seed: 42
+  rae_loss_weight: 0.01
+  optimizer:
+    lr: 2.0e-4
+    betas: [0.9, 0.95]
+    weight_decay: 0.0
+  scheduler:
+    type: linear
+    warmup_epochs: 40
+    decay_end_epoch: 800
+    base_lr: 2.0e-4
+    final_lr: 2.0e-5
+    warmup_from_zero: false

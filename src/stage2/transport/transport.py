@@ -107,7 +107,8 @@ class Transport:
         self.model_type = model_type
         self.time_dist_type = time_dist_type
         self.time_dist_shift = time_dist_shift
-        assert self.time_dist_shift >= 1.0, "time distribution shift must be >= 1.0."
+        # assert self.time_dist_shift >= 1.0, "time distribution shift must be >= 1.0."
+        assert self.time_dist_shift > 0.0, "time distribution shift must be > 0."
         self.path_sampler = path_options[path_type]()
         self.train_eps = train_eps
         self.sample_eps = sample_eps

@@ -193,6 +193,8 @@ def main(args: argparse.Namespace) -> None:
     shift_dim_rae  = misc_rae.get("time_dist_shift_dim", shift_dim_pix)
     shift_base_rae = misc_rae.get("time_dist_shift_base", shift_base_pix)
     time_dist_shift_rae = math.sqrt(shift_dim_rae / shift_base_rae)
+    # Match train_stage3 joint sampling: RAE uses linear s→t (shift=1); pix keeps sqrt(dim/base) (e.g. 2).
+    # time_dist_shift_rae = 1.0  # Pro版
 
     num_classes = int(misc_pix.get("num_classes", 1000))
     null_label  = int(misc_pix.get("null_label", num_classes))
@@ -233,6 +235,11 @@ def main(args: argparse.Namespace) -> None:
     # ---- Build transports (mirror train_stage3.py) ----
     transport_params_pix = dict(transport_pix_d.get("params", {}))
     transport_params_pix.pop("time_dist_shift", None)  # injected explicitly below
+    # Mirror train_stage3 DATA pixel transport: full [0,1] ODE interval (sigma clamp in drift handles tails)
+    transport_params_pix["train_eps"] = 0
+    transport_params_pix["sample_eps"] = 0  # Pro版
+    # transport_params_pix["time_dist_type"] = transport_pix_d.get("params", {}).get("time_dist_type", "logit-normal_0_1")
+    transport_params_pix["time_dist_type"] = "logit-normal_0_1" #原"logit-normal_0.11_0.8"
 
     transport_params_rae = dict(transport_rae_d.get("params", {}))
     transport_params_rae.pop("time_dist_shift", None)
@@ -243,8 +250,13 @@ def main(args: argparse.Namespace) -> None:
     # ---- Sampler settings ----
     sampler_params = dict(sampler_pix_d.get("params", {}))
     num_steps = args.num_steps if args.num_steps is not None else sampler_params.get("num_steps", 50)
-    # "naive" = fixed-step Euler (reliable for DDP); "dopri5" = adaptive (requires torchdiffeq)
-    sampler_type = "naive" if args.naive else "dopri5"
+    # "naive" = fixed-step Euler; "heun" = 2nd-order Heun; "dopri5" = adaptive (requires torchdiffeq)
+    if args.heun:
+        sampler_type = "heun"
+    elif args.naive:
+        sampler_type = "naive"
+    else:
+        sampler_type = "dopri5"
 
     # ---- Guidance settings ----
     guidance_scale = float(guidance_d.get("scale", 1.0))
@@ -353,7 +365,7 @@ def main(args: argparse.Namespace) -> None:
 
             # Dual-stream ODE integration
             # joint_sample_ode returns (x_pix_final, x_rae_final)
-            # x_pix_final IS the generated image (pixel space, [0,1] range)
+            # x_pix_final matches training pixel range [-1, 1] (see train_stage3 x_pix = 2*images - 1)
             samples_pix, _ = joint_sample_ode(
                 z_pix,
                 z_rae,
@@ -372,7 +384,8 @@ def main(args: argparse.Namespace) -> None:
 
             # Convert to uint8 numpy for saving
             samples_np = (
-                samples_pix.clamp(0, 1)
+                # samples_pix.clamp(0, 1)
+                ((samples_pix + 1) / 2).clamp(0, 1)  # Pro版
                 .mul(255)
                 .permute(0, 2, 3, 1)
                 .to("cpu", dtype=torch.uint8)
@@ -428,6 +441,8 @@ if __name__ == "__main__":
                         help="Override CFG t_max (guidance applied when t <= t_max).")
     parser.add_argument("--naive", action="store_true",
                         help="Use naive fixed-step Euler sampler (default: dopri5 adaptive ODE).")
+    parser.add_argument("--heun", action="store_true",
+                        help="Use Heun (improved Euler) 2nd-order sampler.")
 
     args = parser.parse_args()
     main(args)

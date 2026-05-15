@@ -1,0 +1,108 @@
+# ========================
+# FID Sampling & Evaluation Commands
+# ========================
+
+torchrun --standalone --nnodes=1 --nproc_per_node=3 \
+  src/sample_ddp.py \
+  --config configs/stage2/sampling/ImageNet256/DiTDHS-DINOv2-B_ep20.yaml \
+  --sample-dir samples/DiTDHS-ep20-fid50k \
+  --num-fid-samples 50000 \
+  --per-proc-batch-size 64 \
+  --precision fp32 \
+  --label-sampling equal
+
+torchrun --standalone --nnodes=1 --nproc_per_node=8 \
+  src/sample_ddp.py \
+  --config <path> \
+  --sample-dir <path> \
+  --num-fid-samples 50000 \
+  --per-proc-batch-size 64 \
+  --precision fp32 \
+  --label-sampling equal
+
+python -m eval.fid \
+  --arr1 <path> \
+  --arr2 /home/shihaoyang/data/data/VIRTUAL_imagenet256_labeled.npz
+
+torchrun --standalone --nnodes=1 --nproc_per_node=2 \
+  src/sample_pix_ddt.py \
+  --config /home/shihaoyang/RAE/configs/stage2/sampling/ImageNet256/PixDDT_small_v2_lora.yaml \
+  --ckpt /home/shihaoyang/data/ckpts/PixDDTv2/PixDDT_small_v2_lora_0.01/checkpoints/ep-0000050.pt \
+  --sample-dir ~/data/samples/PixDDT_small_v2_lora_0.01-ep50-fid50k \
+  --num-fid-samples 50000 \
+  --per-proc-batch-size 64 \
+  --precision fp32 \
+  --label-sampling equal \
+  --naive
+
+torchrun --standalone --nnodes=1 --nproc_per_node=8 \
+  src/sample_pix_ddt_project.py \
+  --config configs/stage2/sampling/ImageNet256/PixDDT_small_v2_lora_project.yaml \
+  --ckpt /home/shihaoyang/data/ckpts/PixDDTv2/PixDDT_small_v2_project_lora_16_0.01_pix_shift_6.93/checkpoints/ep-0000010.pt \
+  --sample-dir ~/data/samples/PixDDT_small_v2_project_lora_16_0.01_pix_shift_6.93 \
+  --num-fid-samples 50000 \
+  --per-proc-batch-size 64 \
+  --precision fp32 \
+  --label-sampling equal \
+  --naive
+
+# 我们的
+torchrun --standalone --nnodes=1 --nproc_per_node=4 \
+  src/sample_pix_ddt_project_free_layer.py \
+  --config configs/stage2/sampling/ImageNet256/PixDDT_small_v2_lora_project_free_layer.yaml \
+  --ckpt /home/shihaoyang/data/ckpts/PixDDTv2/PixDDT_small_v2_project_free_layer_2_false_logit_normal_0.8_0.8_pix_ts_1_wo_lora_direct_rae_injection/checkpoints/ep-0000050.pt \
+  --sample-dir /home/shihaoyang/data/samples/PixDDT_small_v2_project_free_layer_2_false_logit_normal_0.8_0.8_pix_ts_1_wo_lora_direct_rae_injection \
+  --num-fid-samples 50000 \
+  --per-proc-batch-size 64 \
+  --precision fp32 \
+  --label-sampling equal \
+  --naive
+
+# ========================
+# FID Eval (cd src first, or set PYTHONPATH)
+# ========================
+
+cd ~/RAE/src
+
+# 默认 0 号 GPU，--arr1 根据需要修改
+python -m eval.fid \
+  --arr1 /home/shihaoyang/data/samples/PixDDT_small_v2_project_free_layer_2_false_logit_normal_0.8_0.8_pix_ts_1_wo_lora_direct_rae_injection/PixelDDT-project-ep-0000050-cfg1.00-bs64-euler50-fp32.npz \
+  --ref /home/shihaoyang/data/data/VIRTUAL_imagenet256_labeled.npz \
+  --ref-mu-key mu \
+  --ref-sigma-key sigma
+
+# 指定物理 GPU
+CUDA_VISIBLE_DEVICES=3 python -m eval.fid \
+  --arr1 /home/shihaoyang/data/samples/PixDDT_small_v2_project_free_layer_2_false_logit_normal_0.8_0.8_pix_ts_1_sample_pix_ts_0.25/PixelDDT-project-ep-0000050-cfg1.00-bs64-euler50-fp32.npz \
+  --ref /home/shihaoyang/data/data/VIRTUAL_imagenet256_labeled.npz \
+  --ref-mu-key mu \
+  --ref-sigma-key sigma
+
+
+# ========================
+# Training Launch
+# ========================
+
+bash retry_train_stage3_project.sh
+
+bash retry_train_stage3_project_free_layer.sh
+
+# ========================
+# Misc / Dangerous (do NOT run casually)
+# ========================
+
+# git reset --hard HEAD   # 会丢失所有未提交的改动！
+# rm -rf <path>            # 永久删除，不可恢复！
+
+# ========================
+# 删ckpts
+# ========================
+
+# 找到最后一个ckpts的号码
+m=0; for f in ep-[0-9]*.pt; do n=$((10#${f:3:7})); (( n>m )) && m=$n; done
+
+# 预览：哪些会被删
+for f in ep-[0-9]*.pt; do n=$((10#${f:3:7})); (( n%20==0 || n%25==0 || n==m )) || echo "删除: $f"; done
+
+# 正式删除
+for f in ep-[0-9]*.pt; do n=$((10#${f:3:7})); (( n%20==0 || n%25==0 || n==m )) || rm -v "$f"; done

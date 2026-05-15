@@ -82,7 +82,8 @@ def compute_ode_drift(transport, x, t, model_output):
         t_expand = path.expand_t_like_x(t, x)
         alpha_t, d_alpha_t = transport.path_sampler.compute_alpha_t(t_expand)
         sigma_t, d_sigma_t = transport.path_sampler.compute_sigma_t(t_expand)
-        pred_x0 = (x - alpha_t * model_output) / sigma_t
+        # pred_x0 = (x - alpha_t * model_output) / sigma_t
+        pred_x0 = (x - alpha_t * model_output) / sigma_t.clamp(min=0.05)
         pred_ut = d_alpha_t * model_output + d_sigma_t * pred_x0
         return pred_ut
     else:
@@ -125,7 +126,8 @@ def joint_training_losses(model, x1_pix, x1_rae, transport_pix, transport_rae, m
             t_expand = path.expand_t_like_x(t, xt)
             alpha_t, d_alpha_t = trans.path_sampler.compute_alpha_t(t_expand)
             sigma_t, d_sigma_t = trans.path_sampler.compute_sigma_t(t_expand)
-            pred_x0 = (xt - alpha_t * pred) / sigma_t
+            # pred_x0 = (xt - alpha_t * pred) / sigma_t
+            pred_x0 = (xt - alpha_t * pred) / sigma_t.clamp(min=0.05)
             pred_ut = d_alpha_t * pred + d_sigma_t * pred_x0
             return mean_flat(((pred_ut - target) ** 2))
         else:
@@ -261,8 +263,20 @@ def joint_sample_ode(
     # If we pass time_dist_shift=1.0 to `ode`, it generates linear `self.t` from [t0, t1].
     # Which is exactly what we want 's' to be.
 
-    if sampler_type == "naive":
+    # if sampler_type == "naive":
+    if sampler_type in ("naive", "euler"):
         return joint_sample_ode_naive(
+            z_pix, 
+            z_rae, 
+            model_fn, 
+            transport_pix, 
+            transport_rae,
+            num_steps=num_steps, 
+            **kwargs
+        )
+    
+    if sampler_type == "heun":
+        return joint_sample_ode_heun(
             z_pix, 
             z_rae, 
             model_fn, 
@@ -450,6 +464,94 @@ def joint_sample_ode_naive(
         
     return x_pix, x_rae
 
+def joint_sample_ode_heun(
+    z_pix, 
+    z_rae, 
+    model_fn, 
+    transport_pix, 
+    transport_rae,
+    num_steps=50, 
+    **kwargs
+):
+    """
+    Heun (improved Euler / trapezoidal) ODE solver for coupled generation.
+    Uses two model evaluations per step for 2nd-order accuracy.
+    Last step falls back to Euler following JiT convention.
+    """
+    B = z_pix.shape[0]
+    device = z_pix.device
+    
+    t0, t1 = transport_pix.check_interval(transport_pix.train_eps, transport_pix.sample_eps, eval=True)
+    ss = 1.0 - torch.linspace(t0, t1, num_steps + 1, device=device)
+
+    x_pix = z_pix.detach().clone()
+    x_rae = z_rae.detach().clone()
+    
+    def get_t(s, shift):
+        return shift * s / (1 + (shift - 1) * s)
+    
+    def get_dt_ds(s, shift):
+        denom = 1 + (shift - 1) * s
+        return shift / (denom ** 2)
+
+    capture_intermediates = kwargs.pop('capture_intermediates', False)
+    intermediates = kwargs.pop('intermediates', None)
+    verbose = kwargs.pop('verbose', False)
+
+    def _eval_drift(x_p, x_r, s_val):
+        """Evaluate model and compute drift in s-space at a given s."""
+        t_p_scalar = get_t(s_val, transport_pix.time_dist_shift)
+        t_r_scalar = get_t(s_val, transport_rae.time_dist_shift)
+        t_p = t_p_scalar.repeat(B)
+        t_r = t_r_scalar.repeat(B)
+        dt_ds_p = get_dt_ds(s_val, transport_pix.time_dist_shift)
+        dt_ds_r = get_dt_ds(s_val, transport_rae.time_dist_shift)
+
+        out_p, out_r = model_fn(
+            x_pix=x_p, x_rae=x_r, t_pix=t_p, t_rae=t_r, **kwargs
+        )
+        drift_p_dt = compute_ode_drift(transport_pix, x_p, t_p, out_p)
+        drift_r_dt = compute_ode_drift(transport_rae, x_r, t_r, out_r)
+        k_p = drift_p_dt * dt_ds_p
+        k_r = drift_r_dt * dt_ds_r
+        return k_p, k_r, drift_p_dt, drift_r_dt, t_p_scalar, out_p
+
+    for i in range(num_steps):
+        s_curr = ss[i]
+        s_next = ss[i + 1]
+        ds = s_next - s_curr
+
+        k1_pix, k1_rae, drift1_pix_dt, _, t_pix_scalar, model_out_pix = _eval_drift(
+            x_pix, x_rae, s_curr
+        )
+
+        if verbose and (i == 0 or i == num_steps - 1 or i % 10 == 0):
+            x0_debug = x_pix - t_pix_scalar * model_out_pix
+            print(f"Step {i} | s: {s_curr:.4f} -> {s_next:.4f} (ds={ds:.4f})")
+            print(f"  Pix: t={t_pix_scalar.item():.4f}")
+            print(f"  x_pix: mean={x_pix.mean():.4f}, std={x_pix.std():.4f}")
+            print(f"  x0_pred: mean={x0_debug.mean():.4f}, std={x0_debug.std():.4f}")
+
+        if capture_intermediates and intermediates is not None:
+            intermediates.append({
+                'step': i,
+                't_pix': t_pix_scalar.item(),
+                'x_pix': (x_pix - t_pix_scalar * drift1_pix_dt).detach().cpu(),
+            })
+
+        is_last_step = (i == num_steps - 1)
+        if is_last_step:
+            x_pix = x_pix + k1_pix * ds
+            x_rae = x_rae + k1_rae * ds
+        else:
+            x_pix_mid = x_pix + k1_pix * ds
+            x_rae_mid = x_rae + k1_rae * ds
+            k2_pix, k2_rae, _, _, _, _ = _eval_drift(x_pix_mid, x_rae_mid, s_next)
+            x_pix = x_pix + 0.5 * (k1_pix + k2_pix) * ds
+            x_rae = x_rae + 0.5 * (k1_rae + k2_rae) * ds
+
+    return x_pix, x_rae
+
 from eval import evaluate_generation_distributed
 
 def save_checkpoint(
@@ -610,6 +712,14 @@ def main():
 
     transport_params_pix = dict(transport_cfg_pix.get("params", {}))
     transport_params_pix.pop("time_dist_shift", None)
+    # JiT-style overrides for x-prediction pixel transport:
+    # full [0,1] time range (sigma_t clamp handles numerical safety)
+    transport_params_pix['train_eps'] = 0
+    transport_params_pix['sample_eps'] = 0
+    # transport_params_pix['time_dist_type'] = 'logit-normal_0_1'  # original
+    # transport_params_pix['time_dist_type'] = 'logit-normal_-0.8_0.8'  # wrong sign: JiT convention != SiT convention
+    # logit-normal(0.11, 0.8) ∘ shift(2) = logit-normal(0.11+ln2, 0.8) ≈ logit-normal(0.8, 0.8)
+    transport_params_pix['time_dist_type'] = 'logit-normal_0_1'  # 原'logit-normal_0.11_0.8'
     transport_params_rae = dict(transport_cfg_rae.get("params", {}))
     transport_params_rae.pop("time_dist_shift", None)
 
@@ -716,6 +826,10 @@ def main():
         **transport_params_rae, 
         time_dist_shift=time_dist_shift_rae,
     )
+    # transport_rae = create_transport(
+    #    **transport_params_rae, 
+    #    time_dist_shift=1.0,  # no shift: RAE stream uses t_ori directly, always cleaner than pixel stream
+    #)
     transport_sampler_rae = Sampler(transport_rae)
     if sampler_mode_rae == "ODE":
         eval_sampler_rae = transport_sampler_rae.sample_ode(**sampler_params_rae)
@@ -857,7 +971,8 @@ def main():
                 z = rae.encode(images)
             
             # PixelDDT Input setup
-            x_pix = images
+            # x_pix = images
+            x_pix = 2 * images - 1  # [0,1] -> [-1,1]
             x_rae = z
 
             optimizer.zero_grad(set_to_none=True)
@@ -969,7 +1084,8 @@ def main():
                         samples_rae, _ = samples_rae.chunk(2, dim=0)
                     
                     samples = samples_pix.cpu().float()
-                    samples = samples.clamp(0, 1)
+                    # samples = samples.clamp(0, 1)
+                    samples = ((samples + 1) / 2).clamp(0, 1)  # [-1,1] -> [0,1]
 
                     # Decode RAE samples
                     decoded_rae = rae.decode(samples_rae)
