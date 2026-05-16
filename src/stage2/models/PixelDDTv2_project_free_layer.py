@@ -168,6 +168,7 @@ class PixelDDT(nn.Module):
         rae_inject_final_layer: bool = True,
         use_direct_rae_injection: bool = False,
         direct_rae_in_channels: int = 768,   # channel dim of x1_rae (DINOv2-base = 768)
+        use_y_embedder: bool = False,        # True → non-injected layers use t+y; False → t only
     ):
         super().__init__()
         self.in_channels = in_channels
@@ -186,9 +187,11 @@ class PixelDDT(nn.Module):
         else:
             self._inject_set = set(rae_inject_layers)
         self.use_direct_rae_injection = use_direct_rae_injection
+        self.use_y_embedder = use_y_embedder
         print(f"[PixelDDT free_layer] rae_inject_layers={rae_inject_layers}, "
               f"rae_inject_final_layer={rae_inject_final_layer}, "
               f"use_direct_rae_injection={use_direct_rae_injection}, "
+              f"use_y_embedder={use_y_embedder}, "
               f"pixel_only={self._inject_set is not None and len(self._inject_set) == 0 and not rae_inject_final_layer}")
 
         if stage2_config is None:
@@ -450,10 +453,12 @@ class PixelDDT(nn.Module):
 
         t_pix_emb = self.t_embedder(t_pix)                          # [B, enc_hidden]
         y_emb     = self.y_embedder(y, self.training)                # [B, enc_hidden]
+        # Conditioning base for non-injected layers: t+y (use_y_embedder=True) or t only (False)
+        ty_base   = (t_pix_emb + y_emb) if self.use_y_embedder else t_pix_emb
 
-        # pixel_only fast path: no RAE conditioning, use t+y like standard DiT
+        # pixel_only fast path: no RAE conditioning
         if s_clean is None:
-            c_ty = self.s_projector(nn.functional.silu(t_pix_emb + y_emb))  # [B, hidden_size]
+            c_ty = self.s_projector(nn.functional.silu(ty_base))     # [B, hidden_size]
             for i in range(self.depth):
                 x_pix_emb = self.blocks[i](x_pix_emb, c_ty, feat_rope=self.feat_rope)
             x_pix_emb = self.final_layer(x_pix_emb, c_ty)
@@ -463,8 +468,8 @@ class PixelDDT(nn.Module):
         t_pix_broadcast = t_pix_emb.unsqueeze(1).repeat(1, s_clean.shape[1], 1)
         # Full RAE injection: t_pix + s_clean (s already encodes class info)
         s_trans_rae    = self.s_projector(nn.functional.silu(t_pix_broadcast + s_clean))
-        # t+y fallback for non-injected layers: standard DiT-style conditioning
-        ty_broadcast   = (t_pix_emb + y_emb).unsqueeze(1).repeat(1, s_clean.shape[1], 1)
+        # Fallback for non-injected layers: t+y or t only, controlled by use_y_embedder
+        ty_broadcast   = ty_base.unsqueeze(1).repeat(1, s_clean.shape[1], 1)
         s_trans_t_only = self.s_projector(nn.functional.silu(ty_broadcast))
 
         for i in range(self.depth):
