@@ -169,6 +169,7 @@ class PixelDDT(nn.Module):
         use_direct_rae_injection: bool = False,
         direct_rae_in_channels: int = 768,   # channel dim of x1_rae (DINOv2-base = 768)
         use_y_embedder: bool = False,        # True → non-injected layers use t+y; False → t only
+        use_adaln_zero: bool = False,        # True → zero-init adaLN_modulation[-1] for all blocks (AdaLN-Zero)
     ):
         super().__init__()
         self.in_channels = in_channels
@@ -188,10 +189,12 @@ class PixelDDT(nn.Module):
             self._inject_set = set(rae_inject_layers)
         self.use_direct_rae_injection = use_direct_rae_injection
         self.use_y_embedder = use_y_embedder
+        self.use_adaln_zero = use_adaln_zero
         print(f"[PixelDDT free_layer] rae_inject_layers={rae_inject_layers}, "
               f"rae_inject_final_layer={rae_inject_final_layer}, "
               f"use_direct_rae_injection={use_direct_rae_injection}, "
               f"use_y_embedder={use_y_embedder}, "
+              f"use_adaln_zero={use_adaln_zero}, "
               f"pixel_only={self._inject_set is not None and len(self._inject_set) == 0 and not rae_inject_final_layer}")
 
         if stage2_config is None:
@@ -291,10 +294,17 @@ class PixelDDT(nn.Module):
         nn.init.normal_(self.t_embedder.mlp[2].weight, std=0.02)
         nn.init.normal_(self.y_embedder.embedding_table.weight, std=0.02)
 
+        # final_layer is always AdaLN-Zero (zero init the modulation output projection)
         nn.init.constant_(self.final_layer.adaLN_modulation[-1].weight, 0)
         nn.init.constant_(self.final_layer.adaLN_modulation[-1].bias, 0)
         nn.init.constant_(self.final_layer.linear.weight, 0)
         nn.init.constant_(self.final_layer.linear.bias, 0)
+
+        # Optionally apply AdaLN-Zero to all DiT blocks (gates start at 0 → identity residual)
+        if self.use_adaln_zero:
+            for block in self.blocks:
+                nn.init.constant_(block.adaLN_modulation[-1].weight, 0)
+                nn.init.constant_(block.adaLN_modulation[-1].bias, 0)
 
     # ------------------------------------------------------------------
     # Pixel-only mode flag
