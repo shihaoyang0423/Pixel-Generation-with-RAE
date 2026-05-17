@@ -10,10 +10,12 @@ Extends PixelDDTv2_project.py with configurable per-layer RAE injection:
       Controls whether DDTFinalLayer also receives RAE conditioning,
       independently of rae_inject_layers.
 
-For blocks NOT in rae_inject_layers, conditioning falls back to t_pix only
-(s_trans_t_only = s_projector(silu(t_pix_broadcast))).
+For blocks NOT in rae_inject_layers, conditioning falls back to t_pix + y_embed
+(s_trans_t_only = s_projector(silu(t_pix_broadcast + y_broadcast))), consistent
+with standard DiT which always conditions on both time and class label.
 For blocks IN rae_inject_layers (or when rae_inject_layers is None), conditioning
-uses full RAE features (s_trans_rae = s_projector(silu(t_pix_broadcast + s_clean))).
+uses full RAE features (s_trans_rae = s_projector(silu(t_pix_broadcast + s_clean)));
+s_clean is assumed to already encode class-level semantics so y is not added separately.
 
 All other architecture, training, and inference logic is identical to
 PixelDDTv2_project.py.
@@ -166,6 +168,8 @@ class PixelDDT(nn.Module):
         rae_inject_final_layer: bool = True,
         use_direct_rae_injection: bool = False,
         direct_rae_in_channels: int = 768,   # channel dim of x1_rae (DINOv2-base = 768)
+        use_y_embedder: bool = False,        # True → non-injected layers use t+y; False → t only
+        use_adaln_zero: bool = False,        # True → zero-init adaLN_modulation[-1] for all blocks (AdaLN-Zero)
     ):
         super().__init__()
         self.in_channels = in_channels
@@ -184,9 +188,13 @@ class PixelDDT(nn.Module):
         else:
             self._inject_set = set(rae_inject_layers)
         self.use_direct_rae_injection = use_direct_rae_injection
+        self.use_y_embedder = use_y_embedder
+        self.use_adaln_zero = use_adaln_zero
         print(f"[PixelDDT free_layer] rae_inject_layers={rae_inject_layers}, "
               f"rae_inject_final_layer={rae_inject_final_layer}, "
               f"use_direct_rae_injection={use_direct_rae_injection}, "
+              f"use_y_embedder={use_y_embedder}, "
+              f"use_adaln_zero={use_adaln_zero}, "
               f"pixel_only={self._inject_set is not None and len(self._inject_set) == 0 and not rae_inject_final_layer}")
 
         if stage2_config is None:
@@ -200,6 +208,7 @@ class PixelDDT(nn.Module):
         self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, hidden_size), requires_grad=False)
 
         self.t_embedder = GaussianFourierEmbedding(self.ddt.encoder_hidden_size)
+        self.y_embedder = LabelEmbedder(num_classes, self.ddt.encoder_hidden_size, class_dropout_prob)
 
         self.blocks = nn.ModuleList([
             LightningDDTBlock(
@@ -283,11 +292,19 @@ class PixelDDT(nn.Module):
 
         nn.init.normal_(self.t_embedder.mlp[0].weight, std=0.02)
         nn.init.normal_(self.t_embedder.mlp[2].weight, std=0.02)
+        nn.init.normal_(self.y_embedder.embedding_table.weight, std=0.02)
 
+        # final_layer is always AdaLN-Zero (zero init the modulation output projection)
         nn.init.constant_(self.final_layer.adaLN_modulation[-1].weight, 0)
         nn.init.constant_(self.final_layer.adaLN_modulation[-1].bias, 0)
         nn.init.constant_(self.final_layer.linear.weight, 0)
         nn.init.constant_(self.final_layer.linear.bias, 0)
+
+        # Optionally apply AdaLN-Zero to all DiT blocks (gates start at 0 → identity residual)
+        if self.use_adaln_zero:
+            for block in self.blocks:
+                nn.init.constant_(block.adaLN_modulation[-1].weight, 0)
+                nn.init.constant_(block.adaLN_modulation[-1].bias, 0)
 
     # ------------------------------------------------------------------
     # Pixel-only mode flag
@@ -444,22 +461,26 @@ class PixelDDT(nn.Module):
 
         x_pix_emb = self.x_embedder(x_pix) + self.pos_embed
 
-        t_pix_emb = self.t_embedder(t_pix)
+        t_pix_emb = self.t_embedder(t_pix)                          # [B, enc_hidden]
+        y_emb     = self.y_embedder(y, self.training)                # [B, enc_hidden]
+        # Conditioning base for non-injected layers: t+y (use_y_embedder=True) or t only (False)
+        ty_base   = (t_pix_emb + y_emb) if self.use_y_embedder else t_pix_emb
 
-        # pixel_only fast path: no RAE conditioning, s_clean is not needed
+        # pixel_only fast path: no RAE conditioning
         if s_clean is None:
-            c_t = self.s_projector(nn.functional.silu(t_pix_emb))  # [B, hidden_size]
+            c_ty = self.s_projector(nn.functional.silu(ty_base))     # [B, hidden_size]
             for i in range(self.depth):
-                x_pix_emb = self.blocks[i](x_pix_emb, c_t, feat_rope=self.feat_rope)
-            x_pix_emb = self.final_layer(x_pix_emb, c_t)
+                x_pix_emb = self.blocks[i](x_pix_emb, c_ty, feat_rope=self.feat_rope)
+            x_pix_emb = self.final_layer(x_pix_emb, c_ty)
             return self.unpatchify(x_pix_emb)
 
         # Pre-compute both conditioning variants.
         t_pix_broadcast = t_pix_emb.unsqueeze(1).repeat(1, s_clean.shape[1], 1)
-        # Full RAE injection: t_pix + s_clean
+        # Full RAE injection: t_pix + s_clean (s already encodes class info)
         s_trans_rae    = self.s_projector(nn.functional.silu(t_pix_broadcast + s_clean))
-        # t-only fallback: no s_clean contribution
-        s_trans_t_only = self.s_projector(nn.functional.silu(t_pix_broadcast))
+        # Fallback for non-injected layers: t+y or t only, controlled by use_y_embedder
+        ty_broadcast   = ty_base.unsqueeze(1).repeat(1, s_clean.shape[1], 1)
+        s_trans_t_only = self.s_projector(nn.functional.silu(ty_broadcast))
 
         for i in range(self.depth):
             if self._inject_set is None or i in self._inject_set:
