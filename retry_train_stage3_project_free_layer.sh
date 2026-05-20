@@ -13,9 +13,9 @@
 #   Ctrl-B D  → 退出 tmux 但脚本继续跑
 #   Ctrl-C    → 停止脚本
 
-export CUDA_VISIBLE_DEVICES=4,5,6,7  # 记得check
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7  # 记得check
 
-export EXPERIMENT_NAME="PixDDT_small_v2_project_free_layer_[]_false_logit_normal_0.8_0.8_pix_ts_1_wo_lora"  # 记得check
+export EXPERIMENT_NAME="PixDDT_small_v2_project_free_layer_1_3_5_7_false_wo_lora_w_y_embed_adaln_zero_12_768"  # 记得check
 
 CKPT_DIR="/home/shihaoyang/data/ckpts/PixDDTv2/${EXPERIMENT_NAME}/checkpoints"
 
@@ -52,7 +52,7 @@ TRAIN_TEE_LOG="/home/shihaoyang/RAE/train_project_free_layer_${EXPERIMENT_NAME}.
 FID_TEE_LOG="/home/shihaoyang/RAE/train_project_free_layer_fid_${EXPERIMENT_NAME}.log"
 
 while true; do
-    RETRY_SNAP_MODE=train torchrun --standalone --nnodes=1 --nproc_per_node=4 \
+    RETRY_SNAP_MODE=train torchrun --standalone --nnodes=1 --nproc_per_node=${NUM_GPUS} \
         "${BOOTSTRAP_SCRIPT}" \
         --config "${TRAIN_CONFIG}" \
         --data-path /data/shihaoyang/data/imagenet/256/train \
