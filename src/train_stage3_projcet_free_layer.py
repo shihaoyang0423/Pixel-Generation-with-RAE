@@ -269,15 +269,18 @@ def project_sample_ode_naive(
 
     # -----------------------------------------------------------------------
     # Phase 2: Extract clean conditioning features from denoised RAE
-    # With CFG, extract from the conditional half only (both halves are equal
-    # after CFG guidance, so we use the first B entries).
+    # With CFG, extract s_clean separately for cond/uncond halves so injected
+    # pixel layers see y_null features on the uncond batch slot.
+    # x_rae_clean[:B] and x_rae_clean[B:] are equal after Phase 1 CFG guidance.
     # -----------------------------------------------------------------------
     if using_cfg:
         B = B_full // 2
-        x_rae_clean_cond = x_rae_clean[:B]
+        x_rae_half = x_rae_clean[:B]
         y_cond = y[:B]
-        s_clean_half = model.extract_clean_s(x_rae_clean_cond, y_cond)   # [B, L, C_enc]
-        s_clean = torch.cat([s_clean_half, s_clean_half], dim=0)         # [2B, L, C_enc]
+        y_uncond = y[B:]
+        s_clean_cond = model.extract_clean_s(x_rae_half, y_cond)       # [B, L, C_enc]
+        s_clean_uncond = model.extract_clean_s(x_rae_half, y_uncond)   # [B, L, C_enc]
+        s_clean = torch.cat([s_clean_cond, s_clean_uncond], dim=0)     # [2B, L, C_enc]
     else:
         s_clean = model.extract_clean_s(x_rae_clean, y)                  # [B, L, C_enc]
 
