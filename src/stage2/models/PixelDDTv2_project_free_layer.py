@@ -175,11 +175,36 @@ class PixelDDT(nn.Module):
         self.in_channels = in_channels
         self.out_channels = in_channels
         self.patch_size = patch_size
-        self.depth = depth
-        self.num_heads = num_heads
-        self.hidden_size = hidden_size
         self.input_size = input_size
         self.mask_channel = mask_channel
+
+        # Normalise scalar / list / OmegaConf-ListConfig inputs to plain Python lists
+        def _to_list(v):
+            return [v] if isinstance(v, (int, float)) else list(v)
+        hidden_sizes = _to_list(hidden_size)
+        depths       = _to_list(depth)
+        num_heads_l  = _to_list(num_heads)
+        assert len(hidden_sizes) == len(depths) == len(num_heads_l), (
+            "hidden_size, depth, num_heads must have the same length when given as lists "
+            f"(got {len(hidden_sizes)}, {len(depths)}, {len(num_heads_l)})"
+        )
+        num_stages  = len(hidden_sizes)
+        total_depth = sum(depths)
+        # map global block index → stage index
+        block_stage = []
+        for si, d in enumerate(depths):
+            block_stage.extend([si] * d)
+
+        self.hidden_sizes = hidden_sizes
+        self.depths       = depths
+        self.num_heads_l  = num_heads_l
+        self.num_stages   = num_stages
+        self.total_depth  = total_depth
+        self.block_stage  = block_stage
+        # public-facing scalar aliases (used by CFG code and external callers)
+        self.hidden_size  = hidden_sizes[-1]
+        self.depth        = total_depth
+        self.num_heads    = num_heads_l[0]
 
         # Free-layer injection config
         self.rae_inject_final_layer = rae_inject_final_layer
@@ -203,32 +228,53 @@ class PixelDDT(nn.Module):
         print(f"Loading pretrained DDT model from {stage2_ckpt}...")
         self.ddt = DiTwDDTHead(**stage2_config)
 
-        self.x_embedder = PatchEmbed(input_size, patch_size, in_channels, hidden_size, bias=True)
+        self.x_embedder = PatchEmbed(input_size, patch_size, in_channels, hidden_sizes[0], bias=True)
         num_patches = self.x_embedder.num_patches
-        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, hidden_size), requires_grad=False)
+        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, hidden_sizes[0]), requires_grad=False)
 
         self.t_embedder = GaussianFourierEmbedding(self.ddt.encoder_hidden_size)
         self.y_embedder = LabelEmbedder(num_classes, self.ddt.encoder_hidden_size, class_dropout_prob)
 
-        self.blocks = nn.ModuleList([
-            LightningDDTBlock(
-                hidden_size, num_heads, mlp_ratio=mlp_ratio,
-                use_qknorm=use_qknorm, use_swiglu=use_swiglu,
-                use_rmsnorm=use_rmsnorm, wo_shift=wo_shift,
-            ) for _ in range(self.depth)
+        # Multi-stage blocks: one LightningDDTBlock per (stage, layer)
+        all_blocks = []
+        for si, (hs, d, nh) in enumerate(zip(hidden_sizes, depths, num_heads_l)):
+            for _ in range(d):
+                all_blocks.append(LightningDDTBlock(
+                    hs, nh, mlp_ratio=mlp_ratio,
+                    use_qknorm=use_qknorm, use_swiglu=use_swiglu,
+                    use_rmsnorm=use_rmsnorm, wo_shift=wo_shift,
+                ))
+        self.blocks = nn.ModuleList(all_blocks)
+
+        # Linear bridges between consecutive stages (empty for single-stage)
+        self.stage_bridges = nn.ModuleList([
+            nn.Linear(hidden_sizes[i], hidden_sizes[i + 1])
+            for i in range(num_stages - 1)
         ])
 
-        self.final_layer = DDTFinalLayer(hidden_size, patch_size, self.out_channels, use_rmsnorm=use_rmsnorm)
+        self.final_layer = DDTFinalLayer(hidden_sizes[-1], patch_size, self.out_channels, use_rmsnorm=use_rmsnorm)
 
-        self.s_projector = nn.Linear(self.ddt.encoder_hidden_size, self.hidden_size)
+        # One conditioning projector per stage: enc_hidden → hs[i]
+        self.s_projectors = nn.ModuleList([
+            nn.Linear(self.ddt.encoder_hidden_size, hs)
+            for hs in hidden_sizes
+        ])
+        # Keep legacy alias for single-stage compat (points to stage-0 projector)
+        self.s_projector = self.s_projectors[0]
+
         if use_direct_rae_injection:
             self.s_raw_projector = nn.Linear(direct_rae_in_channels, self.ddt.encoder_hidden_size)
 
+        # One RoPE per stage (dim depends on hs and nh)
         if use_rope:
-            half_head_dim = hidden_size // num_heads // 2
             hw_seq_len = input_size // patch_size
-            self.feat_rope = VisionRotaryEmbeddingFast(dim=half_head_dim, pt_seq_len=hw_seq_len)
+            self.feat_rope_list = nn.ModuleList([
+                VisionRotaryEmbeddingFast(dim=hs // nh // 2, pt_seq_len=hw_seq_len)
+                for hs, nh in zip(hidden_sizes, num_heads_l)
+            ])
+            self.feat_rope = self.feat_rope_list[0]   # legacy alias
         else:
+            self.feat_rope_list = None
             self.feat_rope = None
 
         self.initialize_weights()
@@ -335,13 +381,19 @@ class PixelDDT(nn.Module):
     # Internal: run DDT encoder and return raw bottleneck s
     # ------------------------------------------------------------------
 
-    def _run_ddt_encoder(self, x_rae, t_rae, y):
+    def _sample_cfg_drop_ids(self, y):
+        """One shared per-batch CFG dropout mask for all y_embedder calls in a forward pass."""
+        if not self.training or self.y_embedder.dropout_prob <= 0:
+            return None
+        return (torch.rand(y.shape[0], device=y.device) < self.y_embedder.dropout_prob).long()
+
+    def _run_ddt_encoder(self, x_rae, t_rae, y, force_drop_ids=None):
         """
         Run DDT embedding + encoder blocks for x_rae at timestep t_rae.
         Returns (s, t_ddt, y_ddt) where s is the encoder bottleneck [B, L_enc, C_enc].
         """
         t_ddt = self.ddt.t_embedder(t_rae)
-        y_ddt = self.ddt.y_embedder(y, self.training)
+        y_ddt = self.ddt.y_embedder(y, self.training, force_drop_ids=force_drop_ids)
         c_ddt = nn.functional.silu(t_ddt + y_ddt)
 
         s = self.ddt.s_embedder(x_rae)
@@ -368,7 +420,7 @@ class PixelDDT(nn.Module):
     # New method: extract clean encoder bottleneck from x1_rae at t=0
     # ------------------------------------------------------------------
 
-    def _extract_clean_s(self, x1_rae, y):
+    def _extract_clean_s(self, x1_rae, y, force_drop_ids=None):
         """
         Extract conditioning features from clean RAE latent x1_rae.
         Returns s [B, L_enc, encoder_hidden_size].
@@ -394,7 +446,7 @@ class PixelDDT(nn.Module):
             t_zero = torch.zeros(B, device=x1_rae.device, dtype=x1_rae.dtype)
             ddt_ctx = contextlib.nullcontext() if self.use_lora else torch.no_grad()
             with ddt_ctx:
-                s, _, _ = self._run_ddt_encoder(x1_rae, t_zero, y)
+                s, _, _ = self._run_ddt_encoder(x1_rae, t_zero, y, force_drop_ids=force_drop_ids)
             return s
 
     def extract_clean_s(self, x_rae_clean, y):
@@ -427,7 +479,7 @@ class PixelDDT(nn.Module):
     # Pixel-only forward with configurable per-layer RAE injection
     # ------------------------------------------------------------------
 
-    def forward_pix(self, x_pix, t_pix, y, s_clean):
+    def forward_pix(self, x_pix, t_pix, y, s_clean, force_drop_ids=None):
         """
         Run the Pixel DDT head conditioned on pre-extracted clean bottleneck s_clean.
 
@@ -462,34 +514,49 @@ class PixelDDT(nn.Module):
         x_pix_emb = self.x_embedder(x_pix) + self.pos_embed
 
         t_pix_emb = self.t_embedder(t_pix)                          # [B, enc_hidden]
-        y_emb     = self.y_embedder(y, self.training)                # [B, enc_hidden]
+        y_emb     = self.y_embedder(y, self.training, force_drop_ids=force_drop_ids)  # [B, enc_hidden]
         # Conditioning base for non-injected layers: t+y (use_y_embedder=True) or t only (False)
         ty_base   = (t_pix_emb + y_emb) if self.use_y_embedder else t_pix_emb
 
         # pixel_only fast path: no RAE conditioning
         if s_clean is None:
-            c_ty = self.s_projector(nn.functional.silu(ty_base))     # [B, hidden_size]
-            for i in range(self.depth):
-                x_pix_emb = self.blocks[i](x_pix_emb, c_ty, feat_rope=self.feat_rope)
-            x_pix_emb = self.final_layer(x_pix_emb, c_ty)
+            global_i = 0
+            for si in range(self.num_stages):
+                rope  = self.feat_rope_list[si] if self.feat_rope_list is not None else None
+                c_ty  = self.s_projectors[si](nn.functional.silu(ty_base))   # [B, hs[si]]
+                for _ in range(self.depths[si]):
+                    x_pix_emb = self.blocks[global_i](x_pix_emb, c_ty, feat_rope=rope)
+                    global_i += 1
+                if si < self.num_stages - 1:
+                    x_pix_emb = self.stage_bridges[si](x_pix_emb)
+            c_final = self.s_projectors[-1](nn.functional.silu(ty_base))
+            x_pix_emb = self.final_layer(x_pix_emb, c_final)
             return self.unpatchify(x_pix_emb)
 
-        # Pre-compute both conditioning variants.
-        t_pix_broadcast = t_pix_emb.unsqueeze(1).repeat(1, s_clean.shape[1], 1)
-        # Full RAE injection: t_pix + s_clean (s already encodes class info)
-        s_trans_rae    = self.s_projector(nn.functional.silu(t_pix_broadcast + s_clean))
-        # Fallback for non-injected layers: t+y or t only, controlled by use_y_embedder
-        ty_broadcast   = ty_base.unsqueeze(1).repeat(1, s_clean.shape[1], 1)
-        s_trans_t_only = self.s_projector(nn.functional.silu(ty_broadcast))
+        # Pre-compute both conditioning variants for every stage.
+        t_pix_broadcast = t_pix_emb.unsqueeze(1).repeat(1, s_clean.shape[1], 1)  # [B, L, enc_hidden]
+        ty_broadcast    = ty_base.unsqueeze(1).repeat(1, s_clean.shape[1], 1)    # [B, L, enc_hidden]
+        # Full RAE injection: t_pix + s_clean projected per stage
+        s_trans_rae_list    = [proj(nn.functional.silu(t_pix_broadcast + s_clean))
+                               for proj in self.s_projectors]
+        # Fallback for non-injected layers: t+y (or t only) projected per stage
+        s_trans_t_only_list = [proj(nn.functional.silu(ty_broadcast))
+                               for proj in self.s_projectors]
 
-        for i in range(self.depth):
-            if self._inject_set is None or i in self._inject_set:
-                c = s_trans_rae
-            else:
-                c = s_trans_t_only
-            x_pix_emb = self.blocks[i](x_pix_emb, c, feat_rope=self.feat_rope)
+        global_i = 0
+        for si in range(self.num_stages):
+            rope = self.feat_rope_list[si] if self.feat_rope_list is not None else None
+            for _ in range(self.depths[si]):
+                if self._inject_set is None or global_i in self._inject_set:
+                    c = s_trans_rae_list[si]
+                else:
+                    c = s_trans_t_only_list[si]
+                x_pix_emb = self.blocks[global_i](x_pix_emb, c, feat_rope=rope)
+                global_i += 1
+            if si < self.num_stages - 1:
+                x_pix_emb = self.stage_bridges[si](x_pix_emb)
 
-        c_final = s_trans_rae if self.rae_inject_final_layer else s_trans_t_only
+        c_final = s_trans_rae_list[-1] if self.rae_inject_final_layer else s_trans_t_only_list[-1]
         x_pix_emb = self.final_layer(x_pix_emb, c_final)
         return self.unpatchify(x_pix_emb)
 
@@ -513,25 +580,27 @@ class PixelDDT(nn.Module):
           imgs_out  — pixel velocity prediction (for pixel loss)
           x_rae_out — RAE  velocity prediction  (for RAE loss; zeros tensor when pixel_only)
         """
+        force_drop_ids = self._sample_cfg_drop_ids(y)
+
         # pixel_only fast path: skip RAE encoder and denoising entirely
         if self.pixel_only:
-            imgs_out = self.forward_pix(x_pix, t_pix, y, s_clean=None)
+            imgs_out = self.forward_pix(x_pix, t_pix, y, s_clean=None, force_drop_ids=force_drop_ids)
             return imgs_out, torch.zeros(1, device=x_pix.device, dtype=x_pix.dtype)
 
         # 1. Extract clean conditioning features from x1_rae at t=0
-        s_clean = self._extract_clean_s(x1_rae, y)
+        s_clean = self._extract_clean_s(x1_rae, y, force_drop_ids=force_drop_ids)
 
         # 2. RAE denoising branch — full DDT forward with noisy x_rae (for RAE loss)
         ddt_ctx = contextlib.nullcontext() if self.use_lora else torch.no_grad()
         with ddt_ctx:
-            s_rae, t_ddt_rae, _ = self._run_ddt_encoder(x_rae, t_rae, y)
+            s_rae, t_ddt_rae, _ = self._run_ddt_encoder(x_rae, t_rae, y, force_drop_ids=force_drop_ids)
             t_broadcast_rae = t_ddt_rae.unsqueeze(1).repeat(1, s_rae.shape[1], 1)
             s_trans_rae = nn.functional.silu(t_broadcast_rae + s_rae)
             s_trans_rae = self.ddt.s_projector(s_trans_rae)
             x_rae_out = self._run_ddt_decoder(x_rae, s_trans_rae, t_ddt_rae)
 
         # 3. Pixel head conditioned on clean features (with per-layer injection config)
-        imgs_out = self.forward_pix(x_pix, t_pix, y, s_clean)
+        imgs_out = self.forward_pix(x_pix, t_pix, y, s_clean, force_drop_ids=force_drop_ids)
 
         return imgs_out, x_rae_out
 
