@@ -1,6 +1,6 @@
 #!/bin/bash
-# CFG 参数组合扫描脚本 (当前 free_layer 主力配置, FID5k)
-# 扫描 CFG scale 与 t_min/t_max，不修改 yaml，通过 CLI 参数和 SAVE_FOLDER 控制
+# CFG 参数组合扫描脚本 (free-layer 当前主力配置, FID5k)
+# E/F/G 三组：scale 精扫 + t_min/t_max 部分范围变体
 # 不修改 yaml，通过 CLI 参数和 SAVE_FOLDER 环境变量控制
 # 运行方式：bash cfg_sweep.sh（从 RAE/ 根目录运行）
 
@@ -15,8 +15,7 @@ NPROC=${NPROC:-8}
 
 if [ ! -f "$CKPT" ]; then
     echo "[error] checkpoint not found: $CKPT" >&2
-    echo "        Locate the checkpoint, then rerun with:" >&2
-    echo "        CKPT=/path/to/ep-0000050.pt bash cfg_sweep.sh" >&2
+    echo "        Set CKPT=/path/to/your/free_layer_checkpoint.pt and rerun." >&2
     exit 1
 fi
 if [ ! -f "$CONFIG" ]; then
@@ -33,7 +32,9 @@ RESULTS_FILE="$SAMPLE_BASE/fid_results.txt"
 
 # 追加分隔线，不覆盖已有结果
 echo ""                                                                >> "$RESULTS_FILE"
-echo "--- free_layer CFG sweep: ${EXPERIMENT_NAME} ---"                >> "$RESULTS_FILE"
+echo "--- free-layer CFG sweep: ${EXPERIMENT_NAME} ---"               >> "$RESULTS_FILE"
+echo "ckpt: $CKPT"                                                    >> "$RESULTS_FILE"
+echo "config: $CONFIG"                                                >> "$RESULTS_FILE"
 printf "%-8s  %-8s  %-8s  %s\n" "scale" "t_min" "t_max" "FID5k"      >> "$RESULTS_FILE"
 echo "----------------------------------------"                        >> "$RESULTS_FILE"
 
@@ -86,26 +87,32 @@ run_combo() {
 }
 
 # =====================================================================
-# 当前 free_layer 链路先复现/围绕 CFG scale=2.0 搜索：
-#   · t_max 固定 1.0，避免截断后段去噪
-#   · 先扫 scale，再轻扫 t_min
+# E/F/G：11 种精细组合
+# 依据旧 CFG sweep 结论：
+#   · t_max 必须 = 1.0（截断精细去噪段会导致 FID 暴涨）
+#   · 旧模型最优 scale ≈ 2.5，t_min ≈ 0.3 有轻微增益
+#   · 目标：在 scale ∈ [2.2, 2.8] 和 t_min ∈ [0.0, 0.5] 精细搜索
 # =====================================================================
 
-# --- 组 A：复现无 CFG / 日志中 scale=2 附近 ---
-run_combo 1.0  0.0 1.0
-run_combo 1.6  0.0 1.0
-run_combo 1.8  0.0 1.0
-run_combo 2.0  0.0 1.0
-run_combo 2.2  0.0 1.0
+# --- 组 E：scale 精细步长（全范围，t_min=0.0），0.1 步长 ---
+# 已知 2.5 最优，检查 2.3/2.4/2.6 是否更好
+run_combo 2.3  0.0 1.0
 run_combo 2.4  0.0 1.0
+run_combo 2.6  0.0 1.0
 
-# --- 组 B：围绕 scale=2 轻扫 t_min ---
-run_combo 1.8  0.1 1.0
-run_combo 2.0  0.1 1.0
-run_combo 2.2  0.1 1.0
-run_combo 1.8  0.2 1.0
-run_combo 2.0  0.2 1.0
-run_combo 2.2  0.2 1.0
+# --- 组 F：t_min 精细调（scale=2.5，t_max=1.0 固定） ---
+# 0.3 略优于 0.0，继续在 [0.1, 0.5] 内细化
+run_combo 2.5  0.1 1.0
+run_combo 2.5  0.2 1.0
+run_combo 2.5  0.4 1.0
+run_combo 2.5  0.5 1.0
+
+# --- 组 G：交叉最优候选（最优 scale × 最优 t_min 附近） ---
+# 将精细 scale 与精细 t_min 组合，找真正最优交点
+run_combo 2.3  0.3 1.0
+run_combo 2.4  0.3 1.0
+run_combo 2.6  0.3 1.0
+run_combo 2.4  0.2 1.0
 
 # =====================================================================
 echo ""
