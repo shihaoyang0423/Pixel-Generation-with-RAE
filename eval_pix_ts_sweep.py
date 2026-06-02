@@ -14,7 +14,7 @@ Outputs per pixel_time_shift value:
     PNG dir : {SAMPLE_ROOT}/pix_ts{value:.2f}/
     NPZ file: {SAMPLE_ROOT}/pix_ts{value:.2f}.npz
     log     : {SAMPLE_ROOT}/pix_ts{value:.2f}.log
-Summary   : {SAMPLE_ROOT}/results.txt
+Summary   : {EXPERIMENT_ROOT}/results.txt  (parent of SAMPLE_ROOT)
 """
 
 import copy
@@ -34,11 +34,11 @@ import yaml  # PyYAML (already available in the rae env)
 
 # List of pixel_time_shift values to test.
 # The currently-trained default is 2.0 (dim=16384, base=4096).
-PIXEL_TIME_SHIFTS = [0.05, 0.1, 0.15, 0.25, 0.35, 0.4, 0.45]  # [0.2, 0.3, 0.5, 0.8, 1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 6.0, 7.0]  # <-- modify here
+PIXEL_TIME_SHIFTS = [0.2, 0.3, 0.5, 0.8, 1.0, 1.5, 2.0, 2.5, 3.0]  # [0.05, 0.1, 0.15, 0.25, 0.35, 0.4, 0.45]  # [0.2, 0.3, 0.5, 0.8, 1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 6.0, 7.0]  # <-- modify here
 
 CKPT = (
     "/home/shihaoyang/data/ckpts/PixDDTv2/"
-    "PixDDT_small_v2_project_free_layer_2_false_logit_normal_0.8_0.8_pix_ts_1_wo_lora_direct_rae_injection/checkpoints/ep-0000050.pt"
+    "PixDDT_small_v2_project_free_layer_1_3_5_7_false_wo_lora_w_y_embed_adaln_zero_12_768/checkpoints/ep-0000100.pt"
 )
 
 # Base YAML (relative to RAE/ root) — misc.time_dist_shift_dim will be patched per run
@@ -47,15 +47,18 @@ BASE_CONFIG = (
     "/PixDDT_small_v2_lora_project_free_layer.yaml"
 )
 
-# Root directory for all outputs (PNG dirs, NPZ files, logs, results.txt)
-SAMPLE_ROOT = os.path.expanduser(
-    "~/data/samples/PixDDT_small_v2_project_free_layer_2_false_logit_normal_0.8_0.8_pix_ts_1_wo_lora_direct_rae_injection/compare_different_pix_ts"
+# Experiment root: results.txt is written here
+EXPERIMENT_ROOT = os.path.expanduser(
+    "~/data/samples/PixDDT_small_v2_project_free_layer_1_3_5_7_false_wo_lora_w_y_embed_adaln_zero_12_768"
 )
+
+# Sweep outputs (PNG dirs, NPZ files, logs) go under this subdirectory
+SAMPLE_ROOT = os.path.join(EXPERIMENT_ROOT, "compare_different_pix_ts")
 
 # Reference statistics NPZ for FID computation
 REF_NPZ = os.path.expanduser("~/data/data/VIRTUAL_imagenet256_labeled.npz")
 
-NPROC_PER_NODE = 4    # number of GPUs / torchrun processes
+NPROC_PER_NODE = 8    # number of GPUs / torchrun processes
 BATCH_SIZE = 64       # --per-proc-batch-size
 NUM_FID_SAMPLES = 5000
 PRECISION = "fp32"
@@ -162,15 +165,18 @@ def _compute_fid(npz_path: str, log_path: str) -> str:
 
 
 def sweep():
+    experiment_root = Path(EXPERIMENT_ROOT)
     sample_root = Path(SAMPLE_ROOT)
     sample_root.mkdir(parents=True, exist_ok=True)
-    results_file = sample_root / "results.txt"
+    experiment_root.mkdir(parents=True, exist_ok=True)
+    results_file = experiment_root / "results.txt"
 
     print(f"\n{'='*60}")
     print(f"Pixel TS FID5k Sweep")
     print(f"Checkpoint : {CKPT}")
     print(f"Values     : {PIXEL_TIME_SHIFTS}")
-    print(f"Output root: {sample_root}")
+    print(f"Sample root: {sample_root}")
+    print(f"Results    : {results_file}")
     print(f"{'='*60}\n")
 
     with open(BASE_CONFIG) as f:
