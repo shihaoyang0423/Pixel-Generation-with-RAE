@@ -6,11 +6,26 @@
 
 set -e
 
-CKPT=/home/shihaoyang/data/ckpts/PixDDTv2/PixDDTv2_fp32/checkpoints/ep-0000125.pt
-CONFIG=/home/shihaoyang/RAE/configs/stage2/sampling/ImageNet256/PixelDDTv2_3.yaml
-SAMPLE_BASE=/home/shihaoyang/data/samples/cfg_sweep_ep125
-REF=/home/shihaoyang/data/data/VIRTUAL_imagenet256_labeled.npz
-NPROC=4
+CKPT=${CKPT:-/home/shihaoyang/data/ckpts/PixDDTv2/PixDDTv2_fp32/checkpoints/ep-0000125.pt}
+CONFIG=${CONFIG:-/home/shihaoyang/RAE/configs/stage2/sampling/ImageNet256/PixelDDTv2_3.yaml}
+SAMPLE_BASE=${SAMPLE_BASE:-/home/shihaoyang/data/samples/cfg_sweep_ep125}
+REF=${REF:-/home/shihaoyang/data/data/VIRTUAL_imagenet256_labeled.npz}
+NPROC=${NPROC:-4}
+
+if [ ! -f "$CKPT" ]; then
+    echo "[error] checkpoint not found: $CKPT" >&2
+    echo "        Locate the checkpoint, then rerun with:" >&2
+    echo "        CKPT=/path/to/ep-0000125.pt bash cfg_sweep.sh" >&2
+    exit 1
+fi
+if [ ! -f "$CONFIG" ]; then
+    echo "[error] config not found: $CONFIG" >&2
+    exit 1
+fi
+if [ ! -f "$REF" ]; then
+    echo "[error] reference stats not found: $REF" >&2
+    exit 1
+fi
 
 mkdir -p "$SAMPLE_BASE"
 RESULTS_FILE="$SAMPLE_BASE/fid_results.txt"
