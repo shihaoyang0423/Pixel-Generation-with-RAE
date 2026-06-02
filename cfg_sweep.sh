@@ -17,7 +17,7 @@ RESULTS_FILE="$SAMPLE_BASE/fid_results.txt"
 
 # 追加分隔线，不覆盖已有结果
 echo ""                                                                >> "$RESULTS_FILE"
-echo "--- Round 2: fine-tune scale & t_min near optimum ---"          >> "$RESULTS_FILE"
+echo "--- Round 2 remainder: fine-tune scale & t_min near optimum ---" >> "$RESULTS_FILE"
 printf "%-8s  %-8s  %-8s  %s\n" "scale" "t_min" "t_max" "FID5k"      >> "$RESULTS_FILE"
 echo "----------------------------------------"                        >> "$RESULTS_FILE"
 
@@ -79,9 +79,9 @@ run_combo() {
 
 # --- 组 E：scale 精细步长（全范围，t_min=0.0），0.1 步长 ---
 # 已知 2.5 最优，检查 2.3/2.4/2.6 是否更好
-# run_combo 2.3  0.0 1.0
-# run_combo 2.4  0.0 1.0
-# run_combo 2.6  0.0 1.0
+run_combo 2.3  0.0 1.0
+run_combo 2.4  0.0 1.0
+run_combo 2.6  0.0 1.0
 
 # --- 组 F：t_min 精细调（scale=2.5，t_max=1.0 固定） ---
 # 0.3 略优于 0.0，继续在 [0.1, 0.5] 内细化
@@ -92,10 +92,10 @@ run_combo 2.5  0.5 1.0
 
 # --- 组 G：交叉最优候选（最优 scale × 最优 t_min 附近） ---
 # 将精细 scale 与精细 t_min 组合，找真正最优交点
-# run_combo 2.3  0.3 1.0
-# run_combo 2.4  0.3 1.0
-# run_combo 2.6  0.3 1.0
-# run_combo 2.4  0.2 1.0
+run_combo 2.3  0.3 1.0
+run_combo 2.4  0.3 1.0
+run_combo 2.6  0.3 1.0
+run_combo 2.4  0.2 1.0
 
 # =====================================================================
 echo ""
