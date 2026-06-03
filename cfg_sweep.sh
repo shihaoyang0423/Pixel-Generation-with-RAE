@@ -49,7 +49,7 @@ run_combo() {
 
     # 文件夹/npz 命名：cfg-s{scale}-tmin{t_min}-tmax{t_max}
     local tag
-    tag="cfg-s${scale}-tmin${t_min}-tmax${t_max}"
+    tag="cfg-s${scale}-tmin${t_min}-tmax${t_max}-n${NUM_FID_SAMPLES}"
     local npz_path="$SAMPLE_BASE/${tag}.npz"
 
     echo ""
@@ -90,14 +90,14 @@ run_combo() {
 }
 
 # =====================================================================
-# I：围绕当前最优 scale=1.8,t_min=0,t_max=1 做精细扫描
+# J：FID50k 验证候选
 # 已知：
-#   · t_min>0 在粗扫中普遍变差，但仍轻扫 0.03/0.05/0.08 排除小 interval 收益
-#   · t_max<1 在旧模型上很差，这里只轻扫 0.95/0.98，不碰 0.7/0.8
-#   · FID5k 最优当前为 scale=1.8,t_min=0,t_max=1；FID50k 历史记录 scale=2
+#   · 当前 FID5k 最优为 scale=1.50,t_min=0,t_max=1
+#   · scale=1.50 是已扫范围左边界，因此顺手验证 1.40/1.60
+#   · t_min>0 和 t_max<1 在 FID5k 上都变差，50k 先只测 full interval
 # =====================================================================
 
-# --- 旧 E/F/G/H 组保留但暂停，避免重复消耗 ---
+# --- 旧 E/F/G/H/I 组保留但暂停，避免重复消耗 ---
 # run_combo 2.3  0.0 1.0
 # run_combo 2.4  0.0 1.0
 # run_combo 2.6  0.0 1.0
@@ -116,29 +116,29 @@ run_combo() {
 # run_combo 2.25  0.0 1.0
 # run_combo 2.3   0.0 1.0
 # run_combo 2.35  0.0 1.0
+# run_combo 1.50  0.0 1.0
+# run_combo 1.60  0.0 1.0
+# run_combo 1.70  0.0 1.0
+# run_combo 1.75  0.0 1.0
+# run_combo 1.80  0.0 1.0
+# run_combo 1.85  0.0 1.0
+# run_combo 1.90  0.0 1.0
+# run_combo 1.95  0.0 1.0
+# run_combo 1.70  0.03 1.0
+# run_combo 1.80  0.03 1.0
+# run_combo 1.90  0.03 1.0
+# run_combo 1.70  0.05 1.0
+# run_combo 1.80  0.05 1.0
+# run_combo 1.90  0.05 1.0
+# run_combo 1.80  0.08 1.0
+# run_combo 1.80  0.0 0.98
+# run_combo 1.80  0.0 0.95
 
-# --- 组 I1：scale around 1.8, full interval ---
+# --- 组 J：FID50k candidate for the best FID5k point ---
+# Keep nearby candidates paused until scale=1.50 proves worth extending.
+# run_combo 1.40  0.0 1.0
 run_combo 1.50  0.0 1.0
-run_combo 1.60  0.0 1.0
-run_combo 1.70  0.0 1.0
-run_combo 1.75  0.0 1.0
-run_combo 1.80  0.0 1.0
-run_combo 1.85  0.0 1.0
-run_combo 1.90  0.0 1.0
-run_combo 1.95  0.0 1.0
-
-# --- 组 I2：tiny t_min gating around the current best scale ---
-run_combo 1.70  0.03 1.0
-run_combo 1.80  0.03 1.0
-run_combo 1.90  0.03 1.0
-run_combo 1.70  0.05 1.0
-run_combo 1.80  0.05 1.0
-run_combo 1.90  0.05 1.0
-run_combo 1.80  0.08 1.0
-
-# --- 组 I3：very light t_max check, only near full interval ---
-run_combo 1.80  0.0 0.98
-run_combo 1.80  0.0 0.95
+# run_combo 1.60  0.0 1.0
 
 # =====================================================================
 echo ""
