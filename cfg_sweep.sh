@@ -90,44 +90,55 @@ run_combo() {
 }
 
 # =====================================================================
-# E/F/G/H：先保留旧 E/F/G，再围绕当前最优点加 H 组
-# 依据旧 CFG sweep 结论：
-#   · t_max 必须 = 1.0（截断精细去噪段会导致 FID 暴涨）
-#   · 旧模型最优 scale ≈ 2.5，t_min ≈ 0.3 有轻微增益
-# 新信息：
-#   · 12x1152 / DiTDH-XL / pix_time_shift=3.0 的 FID50k 最好记录在 scale=2
-#   · FID5k 粗扫中 scale=2.3,t_min=0.0 最好，t_min>0 普遍变差
+# I：围绕当前最优 scale=1.8,t_min=0,t_max=1 做精细扫描
+# 已知：
+#   · t_min>0 在粗扫中普遍变差，但仍轻扫 0.03/0.05/0.08 排除小 interval 收益
+#   · t_max<1 在旧模型上很差，这里只轻扫 0.95/0.98，不碰 0.7/0.8
+#   · FID5k 最优当前为 scale=1.8,t_min=0,t_max=1；FID50k 历史记录 scale=2
 # =====================================================================
 
-# --- 组 E：scale 精细步长（全范围，t_min=0.0），0.1 步长 ---
-# 已知 2.5 最优，检查 2.3/2.4/2.6 是否更好
-run_combo 2.3  0.0 1.0
-run_combo 2.4  0.0 1.0
-run_combo 2.6  0.0 1.0
+# --- 旧 E/F/G/H 组保留但暂停，避免重复消耗 ---
+# run_combo 2.3  0.0 1.0
+# run_combo 2.4  0.0 1.0
+# run_combo 2.6  0.0 1.0
+# run_combo 2.5  0.1 1.0
+# run_combo 2.5  0.2 1.0
+# run_combo 2.5  0.4 1.0
+# run_combo 2.5  0.5 1.0
+# run_combo 2.3  0.3 1.0
+# run_combo 2.4  0.3 1.0
+# run_combo 2.6  0.3 1.0
+# run_combo 2.4  0.2 1.0
+# run_combo 1.8   0.0 1.0
+# run_combo 2.0   0.0 1.0
+# run_combo 2.1   0.0 1.0
+# run_combo 2.2   0.0 1.0
+# run_combo 2.25  0.0 1.0
+# run_combo 2.3   0.0 1.0
+# run_combo 2.35  0.0 1.0
 
-# --- 组 F：t_min 精细调（scale=2.5，t_max=1.0 固定） ---
-# 0.3 略优于 0.0，继续在 [0.1, 0.5] 内细化
-run_combo 2.5  0.1 1.0
-run_combo 2.5  0.2 1.0
-run_combo 2.5  0.4 1.0
-run_combo 2.5  0.5 1.0
+# --- 组 I1：scale around 1.8, full interval ---
+run_combo 1.50  0.0 1.0
+run_combo 1.60  0.0 1.0
+run_combo 1.70  0.0 1.0
+run_combo 1.75  0.0 1.0
+run_combo 1.80  0.0 1.0
+run_combo 1.85  0.0 1.0
+run_combo 1.90  0.0 1.0
+run_combo 1.95  0.0 1.0
 
-# --- 组 G：交叉最优候选（最优 scale × 最优 t_min 附近） ---
-# 将精细 scale 与精细 t_min 组合，找真正最优交点
-run_combo 2.3  0.3 1.0
-run_combo 2.4  0.3 1.0
-run_combo 2.6  0.3 1.0
-run_combo 2.4  0.2 1.0
+# --- 组 I2：tiny t_min gating around the current best scale ---
+run_combo 1.70  0.03 1.0
+run_combo 1.80  0.03 1.0
+run_combo 1.90  0.03 1.0
+run_combo 1.70  0.05 1.0
+run_combo 1.80  0.05 1.0
+run_combo 1.90  0.05 1.0
+run_combo 1.80  0.08 1.0
 
-# --- 组 H：围绕当前信息的主搜索中心（t_min=0.0，t_max=1.0） ---
-# 目标：复现日志 scale=2，并细化 FID5k 最优 scale≈2.3。
-run_combo 1.8   0.0 1.0
-run_combo 2.0   0.0 1.0
-run_combo 2.1   0.0 1.0
-run_combo 2.2   0.0 1.0
-run_combo 2.25  0.0 1.0
-run_combo 2.3   0.0 1.0
-run_combo 2.35  0.0 1.0
+# --- 组 I3：very light t_max check, only near full interval ---
+run_combo 1.80  0.0 0.98
+run_combo 1.80  0.0 0.95
 
 # =====================================================================
 echo ""
