@@ -20,6 +20,9 @@ todos:
   - id: run-ablation
     content: 运行第一轮 shared/split cfg scale sweep，记录 FID、最佳 scale 和是否需要细扫
     status: pending
+  - id: fid50k-best
+    content: 用 cfg_scale=1.50, t_min=0.0, t_max=1.0, split_s_clean, pix_ts=3.0 跑 FID50k 单点验证
+    status: pending
 isProject: false
 ---
 
@@ -266,6 +269,8 @@ uncond path: y_null,  s_clean_null
 ## 与后续实验的关系
 
 split_s_clean 是 sampling-only ablation，优先依赖当前 SOTA checkpoint。它不需要重新训练，因此适合作为 CFG 优化的第一步。
+
+当前 CFG scale sweep 已在 `cfg_scale=1.50, t_min=0.0, t_max=1.0` 处得到 FID5k 约 8.73。该结果使用 12x1152 Pixel Head、DiTDH-XL backbone、`rae_inject_layers=[1,3,5,7]`、`pix_time_shift=3.0` 的 sampling config。FID50k 单点验证脚本为 `cfg_fid50k_sclean_split_best.sh`，输出路径单独放在源实验 sample 目录下的 `fid50k_cfg1.50_t0.0_1.0_sclean_split_pix_ts3/`，避免污染已有 sweep 结果。
 
 如果 split 有收益，再考虑：
 

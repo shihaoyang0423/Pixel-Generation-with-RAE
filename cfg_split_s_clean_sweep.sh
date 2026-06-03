@@ -7,8 +7,8 @@ set -e
 SOURCE_EXPERIMENT=PixDDT_small_v2_project_free_layer_1_3_5_7_false_wo_lora_w_y_embed_adaln_zero_12_1152_DiTDH-XL
 CKPT_ROOT=/home/shihaoyang/data/ckpts/PixDDTv2/${SOURCE_EXPERIMENT}
 CKPT=${CKPT_ROOT}/checkpoints/ep-0000050.pt
-CONFIG=${CKPT_ROOT}/config.yaml
-SAMPLE_BASE=/home/shihaoyang/data/samples/${SOURCE_EXPERIMENT}/cfg_split_s_clean_fid5k_ep0000050
+CONFIG=configs/stage2/sampling/ImageNet256/PixDDT_free_layer_1_3_5_7_wo_lora_w_y_embed_adaln_zero_12_1152_DiTDHXL_pix_ts3.yaml
+SAMPLE_BASE=/home/shihaoyang/data/samples/${SOURCE_EXPERIMENT}/cfg_split_s_clean_fid5k_ep0000050_pix_ts3
 REF=/home/shihaoyang/data/data/VIRTUAL_imagenet256_labeled.npz
 NPROC=4
 NUM_FID_SAMPLES=5000
@@ -72,14 +72,13 @@ run_combo() {
     printf "%-8s  %-8s  %-8s  %-8s  %s\n" "$mode" "$scale" "$t_min" "$t_max" "$fid_val" >> "$RESULTS_FILE"
 }
 
-# First pass: keep t_min/t_max fixed near the known CFG sweep region.
-run_combo shared 2.50 0.30 1.00
+# First pass around the current best FID5k point:
+# split, cfg=1.50, t_min=0.0, t_max=1.0.
+run_combo shared 1.50 0.00 1.00
 
-run_combo split 1.50 0.30 1.00
-run_combo split 1.75 0.30 1.00
-run_combo split 2.00 0.30 1.00
-run_combo split 2.25 0.30 1.00
-run_combo split 2.50 0.30 1.00
+run_combo split 1.40 0.00 1.00
+run_combo split 1.50 0.00 1.00
+run_combo split 1.60 0.00 1.00
 
 echo ""
 echo "========================================"
