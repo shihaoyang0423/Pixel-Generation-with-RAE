@@ -90,11 +90,11 @@ run_combo() {
 }
 
 # =====================================================================
-# J：FID50k 验证候选
+# K：FID5k follow-up around the FID50k winner
 # 已知：
-#   · 当前 FID5k 最优为 scale=1.50,t_min=0,t_max=1
-#   · scale=1.50 是已扫范围左边界，因此顺手验证 1.40/1.60
-#   · t_min>0 和 t_max<1 在 FID5k 上都变差，50k 先只测 full interval
+#   · scale=1.50,t_min=0,t_max=1 的 FID50k = 2.871191
+#   · scale=1.50 是此前 FID5k 已扫范围左边界，最优可能在更低 scale
+#   · t_min>0 和 t_max<1 在此前 FID5k 上都变差，这里只做非常小的 interval probe
 # =====================================================================
 
 # --- 旧 E/F/G/H/I 组保留但暂停，避免重复消耗 ---
@@ -134,11 +134,23 @@ run_combo() {
 # run_combo 1.80  0.0 0.98
 # run_combo 1.80  0.0 0.95
 
-# --- 组 J：FID50k candidate for the best FID5k point ---
-# Keep nearby candidates paused until scale=1.50 proves worth extending.
+# --- 组 J：FID50k candidates, paused after scale=1.50 result ---
 # run_combo 1.40  0.0 1.0
-run_combo 1.50  0.0 1.0
+# run_combo 1.50  0.0 1.0
 # run_combo 1.60  0.0 1.0
+
+# --- 组 K1：scale sweep below and around 1.50, full interval ---
+run_combo 1.40  0.0 1.0
+run_combo 1.45  0.0 1.0
+run_combo 1.50  0.0 1.0
+run_combo 1.55  0.0 1.0
+
+# --- 组 K2：tiny interval probes only near the promising scale range ---
+run_combo 1.40  0.01 1.0
+run_combo 1.50  0.01 1.0
+run_combo 1.40  0.02 1.0
+run_combo 1.50  0.02 1.0
+run_combo 1.50  0.0  0.99
 
 # =====================================================================
 echo ""
