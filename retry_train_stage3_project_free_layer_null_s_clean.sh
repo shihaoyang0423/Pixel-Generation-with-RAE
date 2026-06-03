@@ -37,6 +37,17 @@ echo "[init] init ckpt: ${INIT_CKPT}"
 echo "[exp] EXPERIMENT_NAME=${EXPERIMENT_NAME}"
 
 NUM_GPUS=$(echo "${CUDA_VISIBLE_DEVICES}" | tr ',' '\n' | grep -c .)
+WANDB_ARGS=()
+if [ "${USE_WANDB:-1}" = "1" ]; then
+    if [ -n "${ENTITY:-}" ] && [ -n "${PROJECT:-}" ]; then
+        WANDB_ARGS=(--wandb)
+        echo "[wandb] enabled: ENTITY=${ENTITY}, PROJECT=${PROJECT}"
+    else
+        echo "[wandb] disabled because ENTITY or PROJECT is not set. Set USE_WANDB=0 to silence this."
+    fi
+else
+    echo "[wandb] disabled by USE_WANDB=${USE_WANDB}"
+fi
 
 SAMPLE_DIR="${HOME}/data/samples/${EXPERIMENT_NAME}"
 FID_RECORD="/home/shihaoyang/data/ckpts/PixDDTv2/${EXPERIMENT_NAME}/fid_record.txt"
@@ -52,8 +63,8 @@ while true; do
         --results-dir /home/shihaoyang/data/ckpts/PixDDTv2 \
         --precision fp32 \
         --compile \
-        --wandb \
         --ckpt "${INIT_CKPT}" \
+        "${WANDB_ARGS[@]}" \
         2>&1 | tee -a "${TRAIN_TEE_LOG}"
 
     rc=${PIPESTATUS[0]}
