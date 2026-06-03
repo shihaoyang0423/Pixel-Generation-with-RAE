@@ -39,6 +39,7 @@ stage_2:
     use_direct_rae_injection: false    # true → 跳过DDT编码器，直接用干净DINOv2特征注入
     use_y_embedder: true              # true → 无RAE注入的层用 t+y 做AdaLN；false → 只用 t
     use_adaln_zero: true              # true → 所有DiT blocks的adaLN_modulation最后一层零初始化（AdaLN-Zero）
+    use_s_clean_null_token: false     # true → 采样时允许 --s-clean-cfg-mode null 使用可学习的 null s_clean
     direct_rae_in_channels: 768       # x1_rae 的通道数 (DINOv2-base = 768)
 
     stage2_ckpt: '/data/shihaoyang/pretrained/DiTs/Dinov2/wReg_base/ImageNet256/DiTDH-S_ep20/stage2_model.pt'

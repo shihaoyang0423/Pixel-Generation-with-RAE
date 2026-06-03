@@ -36,6 +36,7 @@ stage_2:
     use_direct_rae_injection: false
     use_y_embedder: true
     use_adaln_zero: true
+    use_s_clean_null_token: false
     direct_rae_in_channels: 768
 
     stage2_ckpt: '/data/shihaoyang/pretrained/DiTs/Dinov2/wReg_base/ImageNet256/DiTDH-XL/stage2_model.pt'

@@ -271,7 +271,8 @@ def project_sample_ode_naive(
     # -----------------------------------------------------------------------
     # Phase 2: Extract clean conditioning features from denoised RAE
     # With CFG, choose whether the uncond batch slot reuses class-conditioned
-    # s_clean (shared baseline) or gets y_null-conditioned s_clean (split).
+    # s_clean (shared), gets y_null-conditioned s_clean (split), or receives
+    # a learned null s_clean token (null).
     # x_rae_clean[:B] and x_rae_clean[B:] are equal after Phase 1 CFG guidance.
     # -----------------------------------------------------------------------
     if using_cfg:
@@ -284,6 +285,9 @@ def project_sample_ode_naive(
         elif s_clean_cfg_mode == "split":
             y_uncond = y[B:]
             s_clean_uncond = model.extract_clean_s(x_rae_half, y_uncond)  # [B, L, C_enc]
+            s_clean = torch.cat([s_clean_cond, s_clean_uncond], dim=0)    # [2B, L, C_enc]
+        elif s_clean_cfg_mode == "null":
+            s_clean_uncond = model.get_null_s_clean(B, device=s_clean_cond.device, dtype=s_clean_cond.dtype)
             s_clean = torch.cat([s_clean_cond, s_clean_uncond], dim=0)    # [2B, L, C_enc]
         else:
             raise ValueError(f"Unknown s_clean_cfg_mode: {s_clean_cfg_mode!r}")
@@ -355,6 +359,21 @@ def load_checkpoint(path_str, model, ema_model, optimizer, scheduler):
     if scheduler is not None and checkpoint.get("scheduler") is not None:
         scheduler.load_state_dict(checkpoint["scheduler"])
     return checkpoint.get("epoch", 0), checkpoint.get("step", 0)
+
+
+def load_init_checkpoint(path_str, model, ema_model, logger):
+    checkpoint = torch.load(path_str, map_location="cpu")
+    if isinstance(checkpoint, dict):
+        state_dict = checkpoint.get("ema", checkpoint.get("model", checkpoint))
+    else:
+        state_dict = checkpoint
+    msg_model = model.module.load_state_dict(state_dict, strict=False)
+    msg_ema = ema_model.load_state_dict(state_dict, strict=False)
+    logger.info(f"Initialised model/EMA from {path_str}")
+    logger.info(f"Init model missing keys: {msg_model.missing_keys}")
+    logger.info(f"Init model unexpected keys: {msg_model.unexpected_keys}")
+    logger.info(f"Init EMA missing keys: {msg_ema.missing_keys}")
+    logger.info(f"Init EMA unexpected keys: {msg_ema.unexpected_keys}")
 
 
 # -----------------------------------------------------------------------------
@@ -642,6 +661,11 @@ def main():
         else:
             raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
     else:
+        if args.ckpt is not None:
+            init_ckpt = Path(args.ckpt)
+            if not init_ckpt.is_file():
+                raise FileNotFoundError(f"Initial checkpoint not found: {init_ckpt}")
+            load_init_checkpoint(str(init_ckpt), ddp_model, ema_model, logger)
         if rank == 0:
             save_worktree(experiment_dir, full_cfg)
             logger.info(f"Saved training worktree and config to {experiment_dir}.")

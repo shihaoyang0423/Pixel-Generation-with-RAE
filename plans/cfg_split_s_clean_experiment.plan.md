@@ -23,6 +23,9 @@ todos:
   - id: fid50k-best
     content: 用 cfg_scale=1.50, t_min=0.0, t_max=1.0, split_s_clean, pix_ts=3.0 跑 FID50k 单点验证
     status: pending
+  - id: null-s-clean-token
+    content: 支持可学习 null_s_clean：训练时与 y dropout 同步置空 s_clean，采样时可用 --s-clean-cfg-mode null
+    status: completed
 isProject: false
 ---
 
@@ -81,6 +84,65 @@ Pixel uncond: y_null,  s_clean_null
 
 这样被 RAE feature 注入的 Pixel 层也参与 `cond - uncond`，理论上会让 guidance direction 更接近真正的 conditional/unconditional 差分。
 
+## 后续想法：专门的 null_s_clean
+
+和队友讨论后，另一个更训练侧的 CFG 方案是引入一个专门的 `s_clean <- ∅`，类似类别标签里的第 1000 号 null label。这个方案不是：
+
+```text
+s_clean_null = extract_clean_s(x_rae_clean, y_null)
+```
+
+而是：
+
+```text
+s_clean_null = learned_null_s_clean
+```
+
+二者区别很重要：
+
+| 方案 | uncond 的 s_clean 来源 | 含义 |
+|---|---|---|
+| `split_s_clean` | `extract_clean_s(x_rae_clean, y_null)` | RAE latent 仍参与，只是 DDT encoder 的 label 条件为空 |
+| `null_s_clean` | 可学习参数 `null_s_clean` | Pixel Head 明确看到“没有 RAE 条件”的占位条件 |
+
+训练时 `null_s_clean` 必须和 y dropout 同步：同一个 `force_drop_ids` 让 `y -> y_null`，同时让对应 batch slot 的 `s_clean -> null_s_clean`。这样模型学到的 unconditional path 同时没有类别标签和 RAE 语义条件，更接近真正 CFG 里的无条件分支。
+
+实现上新增模型参数：
+
+```yaml
+use_s_clean_null_token: true
+```
+
+默认是 `false`，避免影响已有 checkpoint。启用后模型会注册：
+
+```python
+null_s_clean: [1, L_enc, C_enc]
+```
+
+训练 forward 中：
+
+```python
+force_drop_ids = sample_cfg_drop_ids(y)
+y_emb = y_embedder(y, force_drop_ids)
+s_clean = extract_clean_s(x1_rae, y, force_drop_ids)
+s_clean = where(force_drop_ids, null_s_clean, s_clean)
+```
+
+采样时，如果 checkpoint 是用 `use_s_clean_null_token=true` 训练出来的，可以使用：
+
+```bash
+--s-clean-cfg-mode null
+```
+
+此时 Pixel CFG 的两路为：
+
+```text
+cond:   y_class, s_clean_cond
+uncond: y_null,  learned_null_s_clean
+```
+
+注意：旧 checkpoint 没有 `null_s_clean` 参数，不能用 `--s-clean-cfg-mode null`；当前 FID50k 验证仍使用 `split`，不受这个训练实验影响。
+
 ## 当前合并后的代码状态
 
 本分支已合并最新 `main`。合并后，`src/train_stage3_projcet_free_layer.py` 的 `project_sample_ode_naive()` 中 Phase 2 已经是 hard-coded split 行为：
@@ -138,6 +200,9 @@ if using_cfg:
         y_uncond = y[B:]
         s_clean_uncond = model.extract_clean_s(x_rae_half, y_uncond)
         s_clean = torch.cat([s_clean_cond, s_clean_uncond], dim=0)
+    elif s_clean_cfg_mode == "null":
+        s_clean_uncond = model.get_null_s_clean(B, device=s_clean_cond.device, dtype=s_clean_cond.dtype)
+        s_clean = torch.cat([s_clean_cond, s_clean_uncond], dim=0)
     else:
         raise ValueError(...)
 else:
@@ -151,7 +216,7 @@ else:
 新增 CLI：
 
 ```bash
---s-clean-cfg-mode shared|split
+--s-clean-cfg-mode shared|split|null
 ```
 
 并传入：
