@@ -253,6 +253,7 @@ def main(args: argparse.Namespace) -> None:
     if args.t_max is not None:
         t_max = float(args.t_max)
     using_cfg = guidance_scale > 1.0
+    s_clean_cfg_mode = args.s_clean_cfg_mode
 
     # ---- Output folder ----
     ckpt_name = (
@@ -262,6 +263,7 @@ def main(args: argparse.Namespace) -> None:
     folder_name = os.environ.get(
         "SAVE_FOLDER",
         f"PixelDDT-project-{ckpt_name}-cfg{guidance_scale:.2f}"
+        f"-sclean-{s_clean_cfg_mode}"
         f"-bs{args.per_proc_batch_size}-euler{num_steps}-{args.precision}",
     )
     sample_folder_dir = os.path.join(args.sample_dir, folder_name)
@@ -331,6 +333,7 @@ def main(args: argparse.Namespace) -> None:
                 num_steps=num_steps,
                 cfg_scale=guidance_scale,
                 cfg_interval=(t_min, t_max),
+                s_clean_cfg_mode=s_clean_cfg_mode,
                 verbose=False,
                 y=sample_y,
             )
@@ -390,6 +393,8 @@ if __name__ == "__main__":
                         help="Override CFG guidance scale from config.")
     parser.add_argument("--t-min", type=float, default=None)
     parser.add_argument("--t-max", type=float, default=None)
+    parser.add_argument("--s-clean-cfg-mode", type=str, choices=["shared", "split"], default="shared",
+                        help="How CFG builds s_clean for cond/uncond Pixel batches.")
     parser.add_argument("--naive", action="store_true",
                         help="Ignored (project version always uses Euler; kept for CLI compat).")
 

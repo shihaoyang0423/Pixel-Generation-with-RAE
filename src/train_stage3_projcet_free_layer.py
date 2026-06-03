@@ -182,6 +182,7 @@ def project_sample_ode_naive(
     num_steps=50,
     cfg_scale=1.0,
     cfg_interval=(0.0, 1.0),
+    s_clean_cfg_mode="shared",
     verbose=False,
     **kwargs
 ):
@@ -269,18 +270,23 @@ def project_sample_ode_naive(
 
     # -----------------------------------------------------------------------
     # Phase 2: Extract clean conditioning features from denoised RAE
-    # With CFG, extract s_clean separately for cond/uncond halves so injected
-    # pixel layers see y_null features on the uncond batch slot.
+    # With CFG, choose whether the uncond batch slot reuses class-conditioned
+    # s_clean (shared baseline) or gets y_null-conditioned s_clean (split).
     # x_rae_clean[:B] and x_rae_clean[B:] are equal after Phase 1 CFG guidance.
     # -----------------------------------------------------------------------
     if using_cfg:
         B = B_full // 2
         x_rae_half = x_rae_clean[:B]
         y_cond = y[:B]
-        y_uncond = y[B:]
         s_clean_cond = model.extract_clean_s(x_rae_half, y_cond)       # [B, L, C_enc]
-        s_clean_uncond = model.extract_clean_s(x_rae_half, y_uncond)   # [B, L, C_enc]
-        s_clean = torch.cat([s_clean_cond, s_clean_uncond], dim=0)     # [2B, L, C_enc]
+        if s_clean_cfg_mode == "shared":
+            s_clean = torch.cat([s_clean_cond, s_clean_cond], dim=0)   # [2B, L, C_enc]
+        elif s_clean_cfg_mode == "split":
+            y_uncond = y[B:]
+            s_clean_uncond = model.extract_clean_s(x_rae_half, y_uncond)  # [B, L, C_enc]
+            s_clean = torch.cat([s_clean_cond, s_clean_uncond], dim=0)    # [2B, L, C_enc]
+        else:
+            raise ValueError(f"Unknown s_clean_cfg_mode: {s_clean_cfg_mode!r}")
     else:
         s_clean = model.extract_clean_s(x_rae_clean, y)                  # [B, L, C_enc]
 
