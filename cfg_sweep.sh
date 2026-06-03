@@ -12,6 +12,9 @@ CONFIG=${CONFIG:-/home/shihaoyang/RAE/configs/stage2/sampling/ImageNet256/PixDDT
 SAMPLE_BASE=${SAMPLE_BASE:-/home/shihaoyang/data/samples/${EXPERIMENT_NAME}/cfg_sweep}
 REF=${REF:-/home/shihaoyang/data/data/VIRTUAL_imagenet256_labeled.npz}
 NPROC=${NPROC:-8}
+BATCH_SIZE=${BATCH_SIZE:-64}
+NUM_FID_SAMPLES=${NUM_FID_SAMPLES:-5000}
+PRECISION=${PRECISION:-fp32}
 
 if [ ! -f "$CKPT" ]; then
     echo "[error] checkpoint not found: $CKPT" >&2
@@ -35,7 +38,7 @@ echo ""                                                                >> "$RESU
 echo "--- free-layer CFG sweep: ${EXPERIMENT_NAME} ---"               >> "$RESULTS_FILE"
 echo "ckpt: $CKPT"                                                    >> "$RESULTS_FILE"
 echo "config: $CONFIG"                                                >> "$RESULTS_FILE"
-printf "%-8s  %-8s  %-8s  %s\n" "scale" "t_min" "t_max" "FID5k"      >> "$RESULTS_FILE"
+printf "%-8s  %-8s  %-8s  %s\n" "scale" "t_min" "t_max" "FID${NUM_FID_SAMPLES}" >> "$RESULTS_FILE"
 echo "----------------------------------------"                        >> "$RESULTS_FILE"
 
 # ---------- 核心函数 ----------
@@ -46,7 +49,7 @@ run_combo() {
 
     # 文件夹/npz 命名：cfg-s{scale}-tmin{t_min}-tmax{t_max}
     local tag
-    tag=$(printf "cfg-s%.1f-tmin%.1f-tmax%.1f" "$scale" "$t_min" "$t_max")
+    tag="cfg-s${scale}-tmin${t_min}-tmax${t_max}"
     local npz_path="$SAMPLE_BASE/${tag}.npz"
 
     echo ""
@@ -64,9 +67,9 @@ run_combo() {
             --config "$CONFIG" \
             --ckpt "$CKPT" \
             --sample-dir "$SAMPLE_BASE" \
-            --num-fid-samples 5000 \
-            --per-proc-batch-size 64 \
-            --precision fp32 \
+            --num-fid-samples "$NUM_FID_SAMPLES" \
+            --per-proc-batch-size "$BATCH_SIZE" \
+            --precision "$PRECISION" \
             --label-sampling equal \
             --naive \
             --cfg-scale "$scale" \
@@ -87,11 +90,13 @@ run_combo() {
 }
 
 # =====================================================================
-# E/F/G：11 种精细组合
+# E/F/G/H：先保留旧 E/F/G，再围绕当前最优点加 H 组
 # 依据旧 CFG sweep 结论：
 #   · t_max 必须 = 1.0（截断精细去噪段会导致 FID 暴涨）
 #   · 旧模型最优 scale ≈ 2.5，t_min ≈ 0.3 有轻微增益
-#   · 目标：在 scale ∈ [2.2, 2.8] 和 t_min ∈ [0.0, 0.5] 精细搜索
+# 新信息：
+#   · 12x1152 / DiTDH-XL / pix_time_shift=3.0 的 FID50k 最好记录在 scale=2
+#   · FID5k 粗扫中 scale=2.3,t_min=0.0 最好，t_min>0 普遍变差
 # =====================================================================
 
 # --- 组 E：scale 精细步长（全范围，t_min=0.0），0.1 步长 ---
@@ -113,6 +118,16 @@ run_combo 2.3  0.3 1.0
 run_combo 2.4  0.3 1.0
 run_combo 2.6  0.3 1.0
 run_combo 2.4  0.2 1.0
+
+# --- 组 H：围绕当前信息的主搜索中心（t_min=0.0，t_max=1.0） ---
+# 目标：复现日志 scale=2，并细化 FID5k 最优 scale≈2.3。
+run_combo 1.8   0.0 1.0
+run_combo 2.0   0.0 1.0
+run_combo 2.1   0.0 1.0
+run_combo 2.2   0.0 1.0
+run_combo 2.25  0.0 1.0
+run_combo 2.3   0.0 1.0
+run_combo 2.35  0.0 1.0
 
 # =====================================================================
 echo ""
