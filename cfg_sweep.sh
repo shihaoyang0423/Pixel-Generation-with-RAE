@@ -140,15 +140,16 @@ run_combo() {
 # run_combo 1.60  0.0 1.0
 
 # --- 组 K1：scale sweep below and around 1.50, full interval ---
+run_combo 1.40  0.0 1.0
 run_combo 1.45  0.0 1.0
 run_combo 1.50  0.0 1.0
-run_combo 1.55  0.0 1.0
+
 
 # --- 组 K2：tiny interval probes only near the promising scale range ---
-run_combo 1.50  0.01 1.0
-run_combo 1.50  0.02 1.0
-run_combo 1.50  0.0  0.99
-run_combo 1.50  0.0  0.98
+# run_combo 1.50  0.1 1.0
+run_combo 1.50  0.2 1.0
+# run_combo 1.50  0.0  0.9
+run_combo 1.50  0.0  0.8
 
 # =====================================================================
 echo ""
