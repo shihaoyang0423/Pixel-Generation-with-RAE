@@ -50,11 +50,11 @@ else
 fi
 
 COMPILE_ARGS=()
-if [ "${USE_COMPILE:-0}" = "1" ]; then
+if [ "${USE_COMPILE:-1}" = "1" ]; then
     COMPILE_ARGS=(--compile)
     echo "[compile] enabled by USE_COMPILE=1"
 else
-    echo "[compile] disabled by default. Set USE_COMPILE=1 to enable torch.compile."
+    echo "[compile] disabled by USE_COMPILE=${USE_COMPILE}"
 fi
 
 SAMPLE_DIR="${HOME}/data/samples/${EXPERIMENT_NAME}"
