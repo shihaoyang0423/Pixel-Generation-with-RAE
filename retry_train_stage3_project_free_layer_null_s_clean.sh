@@ -49,6 +49,14 @@ else
     echo "[wandb] disabled by USE_WANDB=${USE_WANDB}"
 fi
 
+COMPILE_ARGS=()
+if [ "${USE_COMPILE:-0}" = "1" ]; then
+    COMPILE_ARGS=(--compile)
+    echo "[compile] enabled by USE_COMPILE=1"
+else
+    echo "[compile] disabled by default. Set USE_COMPILE=1 to enable torch.compile."
+fi
+
 SAMPLE_DIR="${HOME}/data/samples/${EXPERIMENT_NAME}"
 FID_RECORD="/home/shihaoyang/data/ckpts/PixDDTv2/${EXPERIMENT_NAME}/fid_record.txt"
 REF_NPZ="/home/shihaoyang/data/data/VIRTUAL_imagenet256_labeled.npz"
@@ -62,8 +70,8 @@ while true; do
         --data-path /data/shihaoyang/data/imagenet/256/train \
         --results-dir /home/shihaoyang/data/ckpts/PixDDTv2 \
         --precision fp32 \
-        --compile \
         --ckpt "${INIT_CKPT}" \
+        "${COMPILE_ARGS[@]}" \
         "${WANDB_ARGS[@]}" \
         2>&1 | tee -a "${TRAIN_TEE_LOG}"
 
