@@ -84,23 +84,32 @@ run_combo() {
 
 # Round 1: isolate CFG split at the current best shared interval.
 # Keep one shared t interval for both phases so the only variable is CFG strength.
+# Earlier coarse points showed rae_cfg=1.0 is too weak; stay near the shared
+# CFG-sweep optimum and bridge from 1.4/1.4 toward the mild split winners.
 run_combo cfg_base "$BASE_SHARED_CFG" "$BASE_SHARED_CFG" 0.0 1.0
 
-run_combo cfg_split 1.0 1.5 0.0 1.0
-run_combo cfg_split 1.0 2.0 0.0 1.0
-run_combo cfg_split 1.0 2.5 0.0 1.0
-run_combo cfg_split 1.2 2.0 0.0 1.0
-run_combo cfg_split 1.5 2.0 0.0 1.0
-run_combo cfg_split 1.5 2.5 0.0 1.0
+run_combo cfg_local 1.30 1.40 0.0 1.0
+run_combo cfg_local 1.30 1.50 0.0 1.0
+run_combo cfg_local 1.35 1.45 0.0 1.0
+run_combo cfg_local 1.35 1.50 0.0 1.0
+run_combo cfg_local 1.40 1.50 0.0 1.0
+run_combo cfg_local 1.40 1.60 0.0 1.0
+run_combo cfg_local 1.45 1.55 0.0 1.0
+run_combo cfg_local 1.45 1.70 0.0 1.0
+run_combo cfg_local 1.50 1.60 0.0 1.0
+run_combo cfg_local 1.50 1.80 0.0 1.0
+run_combo cfg_local 1.50 1.90 0.0 1.0
+run_combo cfg_local 1.55 1.80 0.0 1.0
+run_combo cfg_local 1.55 2.00 0.0 1.0
 
 # Round 2: small t-interval probe for likely winners.
 # cfg_sweep.sh suggests t_max=1.0 should stay fixed; only probe t_min.
-run_combo t_probe 1.0 2.0 0.1 1.0
-run_combo t_probe 1.0 2.0 0.2 1.0
-run_combo t_probe 1.0 2.0 0.3 1.0
-run_combo t_probe 1.0 2.5 0.1 1.0
-run_combo t_probe 1.0 2.5 0.2 1.0
-run_combo t_probe 1.0 2.5 0.3 1.0
+run_combo t_probe 1.50 2.00 0.1 1.0
+run_combo t_probe 1.50 2.00 0.2 1.0
+run_combo t_probe 1.50 2.00 0.3 1.0
+run_combo t_probe 1.50 1.80 0.1 1.0
+run_combo t_probe 1.50 1.80 0.2 1.0
+run_combo t_probe 1.50 1.80 0.3 1.0
 
 echo ""
 echo "========================================"
