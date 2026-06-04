@@ -522,6 +522,16 @@ def main():
     t_min = float(guidance_value("t_min", 0.0))
     t_max = float(guidance_value("t_max", 1.0))
 
+    # How CFG builds the uncond s_clean for in-training eval samples.
+    # Default tracks the model: a learned null s_clean token uses "null",
+    # otherwise reuse the class-conditioned s_clean ("shared").
+    _model_uses_null_s = bool(
+        to_dict(model_config).get("params", {}).get("use_s_clean_null_token", False)
+    )
+    s_clean_cfg_mode = guidance_value(
+        "s_clean_cfg_mode", "null" if _model_uses_null_s else "shared"
+    )
+
     experiment_dir, checkpoint_dir, logger = configure_experiment_dirs(args, rank)
 
     #### Model init
@@ -818,6 +828,7 @@ def main():
                         num_steps=sampler_params_pix.get("num_steps", 50),
                         cfg_scale=guidance_scale,
                         cfg_interval=(t_min, t_max),
+                        s_clean_cfg_mode=s_clean_cfg_mode,
                         y=vis_y,
                     )
 
