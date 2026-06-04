@@ -169,6 +169,8 @@ def project_sample_ode_naive(
     transport_rae,
     num_steps=50,
     cfg_scale=1.0,
+    rae_cfg_scale=None,
+    pix_cfg_scale=None,
     cfg_interval=(0.0, 1.0),
     verbose=False,
     **kwargs
@@ -183,12 +185,16 @@ def project_sample_ode_naive(
     model: PixelDDT instance (PixelDDTv2_project.PixelDDT) — passed directly.
     kwargs: must contain at least 'y' (class labels tensor).
 
-    cfg_scale > 1.0: z_pix/z_rae must already be doubled [cond; uncond],
-                     y must be doubled [y_cond; y_null].
+    cfg_scale is the backward-compatible shared default.
+    rae_cfg_scale / pix_cfg_scale optionally split CFG strength by phase.
+    Any CFG scale > 1.0: z_pix/z_rae must already be doubled [cond; uncond],
+                         y must be doubled [y_cond; y_null].
     """
     B_full = z_pix.shape[0]   # may be 2B if CFG
     device = z_pix.device
-    using_cfg = cfg_scale > 1.0
+    rae_cfg_scale = cfg_scale if rae_cfg_scale is None else rae_cfg_scale
+    pix_cfg_scale = cfg_scale if pix_cfg_scale is None else pix_cfg_scale
+    using_cfg = max(rae_cfg_scale, pix_cfg_scale) > 1.0
     y = kwargs['y']
 
     def get_t(s, shift):
@@ -217,7 +223,7 @@ def project_sample_ode_naive(
 
         if using_cfg:
             model_out_rae = model.forward_rae_with_cfg(
-                x_rae, t_rae_batch, y, cfg_scale=cfg_scale, cfg_interval=cfg_interval
+                x_rae, t_rae_batch, y, cfg_scale=rae_cfg_scale, cfg_interval=cfg_interval
             )
         else:
             model_out_rae = model.forward_rae(x_rae, t_rae_batch, y)
@@ -264,7 +270,7 @@ def project_sample_ode_naive(
         if using_cfg:
             model_out_pix = model.forward_pix_with_cfg(
                 x_pix, t_pix_batch, y, s_clean,
-                cfg_scale=cfg_scale, cfg_interval=cfg_interval
+                cfg_scale=pix_cfg_scale, cfg_interval=cfg_interval
             )
         else:
             model_out_pix = model.forward_pix(x_pix, t_pix_batch, y, s_clean)

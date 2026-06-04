@@ -239,6 +239,22 @@ def main(args: argparse.Namespace) -> None:
     guidance_scale = float(guidance_d.get("scale", 1.0))
     if args.cfg_scale is not None:
         guidance_scale = float(args.cfg_scale)
+    rae_cfg_scale = float(
+        guidance_d.get(
+            "rae_scale",
+            guidance_d.get("rae_cfg_scale", guidance_d.get("rae-cfg-scale", guidance_scale)),
+        )
+    )
+    pix_cfg_scale = float(
+        guidance_d.get(
+            "pix_scale",
+            guidance_d.get("pix_cfg_scale", guidance_d.get("pix-cfg-scale", guidance_scale)),
+        )
+    )
+    if args.rae_cfg_scale is not None:
+        rae_cfg_scale = float(args.rae_cfg_scale)
+    if args.pix_cfg_scale is not None:
+        pix_cfg_scale = float(args.pix_cfg_scale)
 
     def _gval(key: str, default: float) -> float:
         if key in guidance_d:
@@ -251,7 +267,7 @@ def main(args: argparse.Namespace) -> None:
     t_max = _gval("t_max", 1.0)
     if args.t_max is not None:
         t_max = float(args.t_max)
-    using_cfg = guidance_scale > 1.0
+    using_cfg = max(rae_cfg_scale, pix_cfg_scale) > 1.0
 
     # ---- Output folder ----
     ckpt_name = (
@@ -260,7 +276,7 @@ def main(args: argparse.Namespace) -> None:
     )
     folder_name = os.environ.get(
         "SAVE_FOLDER",
-        f"PixelDDT-project-{ckpt_name}-cfg{guidance_scale:.2f}"
+        f"PixelDDT-project-{ckpt_name}-rae{rae_cfg_scale:.2f}-pix{pix_cfg_scale:.2f}"
         f"-bs{args.per_proc_batch_size}-euler{num_steps}-{args.precision}",
     )
     sample_folder_dir = os.path.join(args.sample_dir, folder_name)
@@ -268,6 +284,11 @@ def main(args: argparse.Namespace) -> None:
     if rank == 0:
         os.makedirs(sample_folder_dir, exist_ok=True)
         print(f"Saving PNG samples to: {sample_folder_dir}")
+        print(
+            f"Guidance: shared={guidance_scale:.2f}, "
+            f"rae={rae_cfg_scale:.2f}, pix={pix_cfg_scale:.2f}, "
+            f"interval=({t_min:.3f}, {t_max:.3f})"
+        )
     dist.barrier()
 
     # ---- Sampling bookkeeping ----
@@ -329,6 +350,8 @@ def main(args: argparse.Namespace) -> None:
                 transport_rae=transport_rae,
                 num_steps=num_steps,
                 cfg_scale=guidance_scale,
+                rae_cfg_scale=rae_cfg_scale,
+                pix_cfg_scale=pix_cfg_scale,
                 cfg_interval=(t_min, t_max),
                 verbose=False,
                 y=sample_y,
@@ -386,7 +409,11 @@ if __name__ == "__main__":
     parser.add_argument("--precision", type=str, choices=["fp32", "bf16"], default="fp32")
     parser.add_argument("--label-sampling", type=str, choices=["random", "equal"], default="equal")
     parser.add_argument("--cfg-scale", type=float, default=None,
-                        help="Override CFG guidance scale from config.")
+                        help="Override shared CFG guidance scale from config.")
+    parser.add_argument("--rae-cfg-scale", type=float, default=None,
+                        help="Override Phase 1 RAE CFG scale.")
+    parser.add_argument("--pix-cfg-scale", type=float, default=None,
+                        help="Override Phase 3 Pixel CFG scale.")
     parser.add_argument("--t-min", type=float, default=None)
     parser.add_argument("--t-max", type=float, default=None)
     parser.add_argument("--naive", action="store_true",
