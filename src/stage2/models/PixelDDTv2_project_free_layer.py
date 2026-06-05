@@ -406,9 +406,12 @@ class PixelDDT(nn.Module):
         if not self.use_s_clean_null_token or force_drop_ids is None:
             return s_clean
         drop_mask = (force_drop_ids == 1).view(-1, 1, 1)
-        if not drop_mask.any():
-            return s_clean
         null_s = self.get_null_s_clean(s_clean.shape[0], device=s_clean.device, dtype=s_clean.dtype)
+        # Always route null_s through torch.where — even when no sample is dropped in
+        # this micro-batch (drop_mask all False, output == s_clean unchanged). This keeps
+        # null_s_clean in the autograd graph every iteration so it always receives a
+        # gradient; otherwise DDP trips on "parameter did not receive grad" the moment a
+        # micro-batch happens to have zero dropouts (no find_unused_parameters needed).
         return torch.where(drop_mask, null_s, s_clean)
 
     def _run_ddt_encoder(self, x_rae, t_rae, y, force_drop_ids=None):
