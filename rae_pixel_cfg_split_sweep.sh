@@ -9,7 +9,7 @@
 # Optional overrides:
 #   CONFIG=/path/to/sampling.yaml SAMPLE_BASE=/path/to/samples REF=/path/to/ref.npz \
 #   REPO_ROOT=/home/shihaoyang/RAE NPROC=4 NUM_FID_SAMPLES=5000 \
-#   PER_PROC_BATCH_SIZE=64 PRECISION=fp32 \
+#   PER_PROC_BATCH_SIZE=64 PRECISION=fp32 RUN_MODE=sweep|best|compare \
 #   bash rae_pixel_cfg_split_sweep.sh
 
 set -e
@@ -25,6 +25,7 @@ NUM_FID_SAMPLES=${NUM_FID_SAMPLES:-5000}
 PER_PROC_BATCH_SIZE=${PER_PROC_BATCH_SIZE:-64}
 PRECISION=${PRECISION:-fp32}
 BASE_SHARED_CFG=${BASE_SHARED_CFG:-1.40}
+RUN_MODE=${RUN_MODE:-sweep}
 
 cd "$REPO_ROOT"
 mkdir -p "$SAMPLE_BASE"
@@ -81,6 +82,27 @@ run_combo() {
     echo "  -> FID: $fid_val"
     printf "%-12s  %-10s  %-10s  %-8s  %-8s  %s\n" "$round_name" "$rae_cfg" "$pix_cfg" "$t_min" "$t_max" "$fid_val" >> "$RESULTS_FILE"
 }
+
+if [ "$RUN_MODE" = "best" ]; then
+    run_combo fid50k_best 1.45 1.70 0.0 1.0
+    echo ""
+    echo "========================================"
+    echo "ALL DONE. Results appended to: $RESULTS_FILE"
+    echo "========================================"
+    cat "$RESULTS_FILE"
+    exit 0
+fi
+
+if [ "$RUN_MODE" = "compare" ]; then
+    run_combo fid50k_base "$BASE_SHARED_CFG" "$BASE_SHARED_CFG" 0.0 1.0
+    run_combo fid50k_best 1.45 1.70 0.0 1.0
+    echo ""
+    echo "========================================"
+    echo "ALL DONE. Results appended to: $RESULTS_FILE"
+    echo "========================================"
+    cat "$RESULTS_FILE"
+    exit 0
+fi
 
 # Round 1: isolate CFG split at the current best shared interval.
 # Keep one shared t interval for both phases so the only variable is CFG strength.
