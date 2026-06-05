@@ -584,11 +584,19 @@ def main():
         logger.info(f"Eval dataset: {eval_data} ({len(eval_dataset)} images)")
 
     loader_batches = len(loader)
-    if loader_batches % grad_accum_steps != 0:
-        raise ValueError("loader batches must be divisible by grad_accum_steps.")
     steps_per_epoch = loader_batches // grad_accum_steps
     if steps_per_epoch <= 0:
         raise ValueError("grad_accum results in zero optimizer steps per epoch.")
+    # Drop a trailing partial accumulation group (if any) so every optimizer step
+    # sees exactly grad_accum_steps micro-batches. The loader reshuffles each epoch,
+    # so the few dropped samples differ every epoch and the effect is negligible.
+    usable_micro_batches = steps_per_epoch * grad_accum_steps
+    if loader_batches != usable_micro_batches and rank == 0:
+        logger.info(
+            f"[grad_accum] {loader_batches} micro-batches/epoch not divisible by "
+            f"grad_accum_steps={grad_accum_steps}; dropping last "
+            f"{loader_batches - usable_micro_batches} micro-batch(es) per epoch."
+        )
 
     if training_cfg.get("scheduler"):
         scheduler, sched_msg = build_scheduler(optimizer, steps_per_epoch, training_cfg)
@@ -727,6 +735,8 @@ def main():
                 sys.exit(3)
 
         for step, (images, labels) in enumerate(loader):
+            if step >= usable_micro_batches:
+                break  # drop trailing partial accumulation group
             images = images.to(device)
             labels = labels.to(device)
             # Skip RAE encoding entirely in pixel_only mode
@@ -740,7 +750,6 @@ def main():
             # Pixel input: [0, 1] range (no 2x-1 normalisation — project baseline)
             x_pix = images
 
-            optimizer.zero_grad(set_to_none=True)
             model_kwargs = dict(y=labels)
 
             with autocast(**autocast_kwargs):
@@ -762,11 +771,14 @@ def main():
                 scaler.scale(loss / grad_accum_steps).backward()
             else:
                 (loss / grad_accum_steps).backward()
-            if clip_grad:
-                if scaler:
-                    scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(ddp_model.parameters(), clip_grad)
-            if global_step % grad_accum_steps == 0:
+            # Gradients accumulate in-place across the group; step + clip + zero_grad
+            # only once the group of grad_accum_steps micro-batches is complete.
+            # (optimizer.zero_grad once before the epoch loop seeds the first group.)
+            if (step + 1) % grad_accum_steps == 0:
+                if clip_grad:
+                    if scaler:
+                        scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(ddp_model.parameters(), clip_grad)
                 if scaler:
                     scaler.step(optimizer)
                     scaler.update()
@@ -775,6 +787,7 @@ def main():
                 if scheduler is not None:
                     scheduler.step()
                 update_ema(ema_model, ddp_model.module, decay=ema_decay)
+                optimizer.zero_grad(set_to_none=True)
             running_loss += loss.item()
             running_loss_pix += loss_pix.mean().item()
             running_loss_rae_w += (rae_loss_weight * loss_rae).mean().item()
