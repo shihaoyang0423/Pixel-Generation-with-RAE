@@ -38,18 +38,19 @@ PIXEL_TIME_SHIFTS = [0.2, 0.3, 0.5, 0.8, 1.0, 1.5, 2.0, 2.5, 3.0]  # [0.05, 0.1,
 
 CKPT = (
     "/home/shihaoyang/data/ckpts/PixDDTv2/"
-    "PixDDT_small_v2_project_free_layer_1_3_5_7_false_wo_lora_w_y_embed_adaln_zero_12_768/checkpoints/ep-0000100.pt"
+    "PixDDT_small_v2_project_free_layer_1_3_5_7_false_wo_lora_w_y_embed_adaln_zero_12_1152_DiTDHXL_null_s_clean"
+    "/checkpoints/ep-0000060.pt"
 )
 
 # Base YAML (relative to RAE/ root) — misc.time_dist_shift_dim will be patched per run
 BASE_CONFIG = (
     "configs/stage2/sampling/ImageNet256"
-    "/PixDDT_small_v2_lora_project_free_layer.yaml"
+    "/PixDDT_free_layer_2_wo_lora_w_y_embed_adaln_zero_6_768_DiTDHS_null_s_clean.yaml"
 )
 
 # Experiment root: results.txt is written here
 EXPERIMENT_ROOT = os.path.expanduser(
-    "~/data/samples/PixDDT_small_v2_project_free_layer_1_3_5_7_false_wo_lora_w_y_embed_adaln_zero_12_768"
+    "~/data/samples/null768_ep60"
 )
 
 # Sweep outputs (PNG dirs, NPZ files, logs) go under this subdirectory
@@ -62,6 +63,13 @@ NPROC_PER_NODE = 8    # number of GPUs / torchrun processes
 BATCH_SIZE = 64       # --per-proc-batch-size
 NUM_FID_SAMPLES = 5000
 PRECISION = "fp32"
+
+# CFG / s_clean conditioning passed to the sampler (free_layer null-token model).
+# CFG_SCALE = None → no CFG override (use config's guidance.scale, i.e. w/o CFG).
+# S_CLEAN_CFG_MODE = None → don't pass (sampler default "shared"); set "null" for the
+# learned null s_clean token, matching how this model was trained.
+CFG_SCALE = 1.5
+S_CLEAN_CFG_MODE = "null"
 
 # Python executable with torch / numpy etc. (rae conda env)
 PYTHON = "/home/shihaoyang/miniconda3/envs/rae/bin/python"
@@ -216,6 +224,10 @@ def sweep():
                     "--label-sampling", "equal",
                     "--naive",
                 ]
+                if CFG_SCALE is not None:
+                    sample_cmd += ["--cfg-scale", str(CFG_SCALE)]
+                if S_CLEAN_CFG_MODE is not None:
+                    sample_cmd += ["--s-clean-cfg-mode", S_CLEAN_CFG_MODE]
                 print(f"[sweep] Running sampling...")
                 rc = _run(
                     sample_cmd,
