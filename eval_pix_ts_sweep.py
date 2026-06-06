@@ -34,7 +34,7 @@ import yaml  # PyYAML (already available in the rae env)
 
 # List of pixel_time_shift values to test.
 # The currently-trained default is 2.0 (dim=16384, base=4096).
-PIXEL_TIME_SHIFTS = [0.2, 0.3, 0.5, 0.8, 1.0, 1.5, 2.0, 2.5, 3.0]  # [0.05, 0.1, 0.15, 0.25, 0.35, 0.4, 0.45]  # [0.2, 0.3, 0.5, 0.8, 1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 6.0, 7.0]  # <-- modify here
+PIXEL_TIME_SHIFTS = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]  # round 2: extend upper range at best cfg  # <-- modify here
 
 CKPT = (
     "/home/shihaoyang/data/ckpts/PixDDTv2/"
@@ -48,9 +48,11 @@ BASE_CONFIG = (
     "/PixDDT_free_layer_2_wo_lora_w_y_embed_adaln_zero_6_768_DiTDHS_null_s_clean.yaml"
 )
 
-# Experiment root: results.txt is written here
+# Experiment root: results.txt is written here.
+# NOTE: new dir per cfg value — the sweep names npz only by pix_ts (not cfg), so reusing
+# the cfg=1.5 dir would SKIP sampling and re-report stale cfg=1.5 numbers.
 EXPERIMENT_ROOT = os.path.expanduser(
-    "~/data/samples/null768_ep60"
+    "~/data/samples/null768_ep60_cfg2.5"
 )
 
 # Sweep outputs (PNG dirs, NPZ files, logs) go under this subdirectory
@@ -68,7 +70,7 @@ PRECISION = "fp32"
 # CFG_SCALE = None → no CFG override (use config's guidance.scale, i.e. w/o CFG).
 # S_CLEAN_CFG_MODE = None → don't pass (sampler default "shared"); set "null" for the
 # learned null s_clean token, matching how this model was trained.
-CFG_SCALE = 1.5
+CFG_SCALE = 2.5
 S_CLEAN_CFG_MODE = "null"
 
 # Python executable with torch / numpy etc. (rae conda env)
