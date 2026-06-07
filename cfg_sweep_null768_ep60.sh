@@ -45,7 +45,7 @@ run_combo() {
     local rae_col="coupled"
     if [ -n "$rae_cfg" ]; then
         rae_args=(--rae-cfg-scale "$rae_cfg")
-        rae_tag=$(printf "-rae%.2f" "$rae_cfg")
+        rae_tag="-$(printf 'rae%.2f' "$rae_cfg")"
         rae_col="$rae_cfg"
     fi
 
