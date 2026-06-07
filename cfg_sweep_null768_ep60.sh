@@ -16,6 +16,9 @@ CONFIG=configs/stage2/sampling/ImageNet256/PixDDT_free_layer_2_wo_lora_w_y_embed
 # Optional pixel_time_shift override (patches misc.time_dist_shift_dim = round(PIX_TS^2*4096)).
 # Empty → use config's pix_ts (=1.0). Set to the best from eval_pix_ts_sweep.py, e.g. PIX_TS=6.
 PIX_TS=${PIX_TS:-}
+# INTERVAL=1 → run a CFG-interval sweep (restrict CFG to [t_min,t_max]) instead of the
+# mode/decouple blocks. Composes with PIX_TS. (t=1 noise end, t=0 clean end.)
+INTERVAL=${INTERVAL:-}
 SAMPLE_BASE=/home/shihaoyang/data/samples/null768_ep60/mode_compare
 REF=/home/shihaoyang/data/data/VIRTUAL_imagenet256_labeled.npz
 NPROC=8
@@ -105,7 +108,17 @@ run_combo() {
     printf "%-8s  %-8s  %-8s  %-8s  %-8s  %s\n" "$mode" "$scale" "$t_min" "$t_max" "$rae_col" "$fid_val" >> "$RESULTS_FILE"
 }
 
-if [ -z "$PIX_TS" ]; then
+if [ -n "$INTERVAL" ]; then
+    # ===== CFG-interval sweep (null, cfg=2.5): restrict CFG to [t_min, t_max] =====
+    # t=1 is NOISE, t=0 is CLEAN. Dropping CFG near the clean end (t<t_min) usually helps;
+    # also probe trimming the noise end (t_max<1). The (0.0,1.0) row = full-CFG anchor (cached).
+    for tmin in 0.0 0.1 0.2 0.3 0.4; do
+        run_combo null 2.5 "$tmin" 1.0
+    done
+    run_combo null 2.5 0.0 0.8
+    run_combo null 2.5 0.2 0.8
+    run_combo null 2.5 0.1 0.9
+elif [ -z "$PIX_TS" ]; then
     # ===== pix_ts = 1.0 (config default) blocks =====
     # (1) 4-mode compare, RAE-CFG coupled = ON (npz cached from earlier → no resample).
     for mode in shared split null traj; do

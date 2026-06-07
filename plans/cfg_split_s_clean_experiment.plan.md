@@ -103,7 +103,7 @@ Phase 2 给 uncond 半边的 s_clean 有三种取法（均已实现，`--s-clean
 | `split` | `extract_clean_s(x_rae_clean, y_null)` | RAE latent 仍参与，只是 DDT encoder 的 label 条件置空 | 否 |
 | `null` | 可学习参数 `null_s_clean`（学到的 ∅） | Pixel Head 看到“完全没有 RAE 条件”的占位符 | **是** |
 
-`split` vs `null` 的本质区别（也是和队友讨论的核心）：
+`split` vs `null` 的本质区别：
 
 - `split` 是**推理期**技巧，把真实 `x_rae_clean` 再过一遍 encoder、只把 label 置空。模型训练时**从没见过**这种 s_clean，多少有点 out-of-distribution。
 - `null` 是**训练期**方案：给 s_clean 一个专门的、可学习的 ∅，训练时随 y dropout 同步置空，模型 in-distribution 地学到一个真正的“无条件 s_clean”，和 y_embedder 的第 1000 号空类完全对称。
@@ -174,11 +174,10 @@ torchrun ... src/sample_pix_ddt_project_free_layer.py \
 
 **B 版也救不了**:可证 `traj-B 的 cond 路 = split 的 cond 路`,唯一区别是 traj-B 的 uncond 来自另一张图(比 split 的"同图丢类别"更脏)→ `traj-B ≥ split > null`,必输。所以 traj/traj-B 是死路,根因②无解。
 
-> 反过来这正好说明:队友想要的"好 s_clean vs 坏 s_clean 做 CFG"是对的,但"坏 s_clean"不能用另一张图来凑——它的正确形态就是训练出来的 ∅(= `null`),而 `null` 就是赢家。
 
 ## RAE-CFG 解耦（"RAE 不开 CFG"实验）
 
-队友另一个想法:把 Phase 1(RAE)和 Phase 3(Pixel)的 CFG **解耦**,让 RAE 流可以**不开** CFG。
+把 Phase 1(RAE)和 Phase 3(Pixel)的 CFG **解耦**,让 RAE 流可以**不开** CFG。
 
 **理论动机(为什么有希望):** 训练时 Pixel Head 的 s_clean 来自 `extract(x1_rae, y)`,而 `x1_rae` 是**真实图像**的 DINOv2 编码(自然分布)。推理时若 RAE-CFG 开,Phase 1 的 latent 被 CFG **过度锐化**,偏离真实 latent 分布 → s_clean 对 Pixel Head 偏 OOD;**RAE-CFG 关**则得到一张自然条件 latent,s_clean 更 in-distribution,**可能反而更好**。且它**没有 traj 的"两张图"问题**(Phase 1 仍只产一张条件图,cond/uncond 对照交给 Pixel 流的 null/split)。
 
