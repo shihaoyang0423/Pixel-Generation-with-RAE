@@ -34,7 +34,7 @@ import yaml  # PyYAML (already available in the rae env)
 
 # List of pixel_time_shift values to test.
 # The currently-trained default is 2.0 (dim=16384, base=4096).
-PIXEL_TIME_SHIFTS = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]  # round 2: extend upper range at best cfg  # <-- modify here
+PIXEL_TIME_SHIFTS = [6.0, 7.0, 8.0]  # round 3: still falling at 6 → find the bottom  # <-- modify here
 
 CKPT = (
     "/home/shihaoyang/data/ckpts/PixDDTv2/"
@@ -72,6 +72,7 @@ PRECISION = "fp32"
 # learned null s_clean token, matching how this model was trained.
 CFG_SCALE = 2.5
 S_CLEAN_CFG_MODE = "null"
+RAE_CFG_SCALE = None   # None = couple RAE-CFG to CFG_SCALE; set e.g. 2.0 to decouple
 
 # Python executable with torch / numpy etc. (rae conda env)
 PYTHON = "/home/shihaoyang/miniconda3/envs/rae/bin/python"
@@ -230,6 +231,8 @@ def sweep():
                     sample_cmd += ["--cfg-scale", str(CFG_SCALE)]
                 if S_CLEAN_CFG_MODE is not None:
                     sample_cmd += ["--s-clean-cfg-mode", S_CLEAN_CFG_MODE]
+                if RAE_CFG_SCALE is not None:
+                    sample_cmd += ["--rae-cfg-scale", str(RAE_CFG_SCALE)]
                 print(f"[sweep] Running sampling...")
                 rc = _run(
                     sample_cmd,

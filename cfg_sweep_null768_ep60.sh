@@ -13,12 +13,26 @@ SOURCE_EXPERIMENT=PixDDT_small_v2_project_free_layer_1_3_5_7_false_wo_lora_w_y_e
 CKPT_ROOT=/home/shihaoyang/data/ckpts/PixDDTv2/${SOURCE_EXPERIMENT}
 CKPT=${CKPT_ROOT}/checkpoints/ep-0000060.pt
 CONFIG=configs/stage2/sampling/ImageNet256/PixDDT_free_layer_2_wo_lora_w_y_embed_adaln_zero_6_768_DiTDHS_null_s_clean.yaml
+# Optional pixel_time_shift override (patches misc.time_dist_shift_dim = round(PIX_TS^2*4096)).
+# Empty → use config's pix_ts (=1.0). Set to the best from eval_pix_ts_sweep.py, e.g. PIX_TS=6.
+PIX_TS=${PIX_TS:-}
 SAMPLE_BASE=/home/shihaoyang/data/samples/null768_ep60/mode_compare
 REF=/home/shihaoyang/data/data/VIRTUAL_imagenet256_labeled.npz
 NPROC=8
 NUM_FID_SAMPLES=5000
 BATCH_SIZE=64
 PRECISION=fp32
+
+# If PIX_TS is set, build a patched config and tag outputs so they don't collide with pix_ts=1 runs.
+PIX_TS_TAG=""
+if [ -n "$PIX_TS" ]; then
+    dim=$(python3 -c "print(round($PIX_TS**2*4096))")
+    PATCHED_CONFIG=/tmp/cfg_sweep_null768_pixts${PIX_TS}.yaml
+    sed "s/time_dist_shift_dim: 4096/time_dist_shift_dim: ${dim}/" "$CONFIG" > "$PATCHED_CONFIG"
+    CONFIG="$PATCHED_CONFIG"
+    PIX_TS_TAG="-pixts${PIX_TS}"
+    echo "[pix_ts] using PIX_TS=$PIX_TS (dim=$dim), patched config: $PATCHED_CONFIG"
+fi
 
 mkdir -p "$SAMPLE_BASE"
 RESULTS_FILE="$SAMPLE_BASE/fid_results_modes.txt"
@@ -50,7 +64,7 @@ run_combo() {
     fi
 
     local tag
-    tag=$(printf "sclean-%s-s%.2f-tmin%.2f-tmax%.2f%s" "$mode" "$scale" "$t_min" "$t_max" "$rae_tag")
+    tag=$(printf "sclean-%s-s%.2f-tmin%.2f-tmax%.2f%s%s" "$mode" "$scale" "$t_min" "$t_max" "$rae_tag" "$PIX_TS_TAG")
     local npz_path="$SAMPLE_BASE/${tag}.npz"
 
     echo ""
@@ -91,25 +105,32 @@ run_combo() {
     printf "%-8s  %-8s  %-8s  %-8s  %-8s  %s\n" "$mode" "$scale" "$t_min" "$t_max" "$rae_col" "$fid_val" >> "$RESULTS_FILE"
 }
 
-# (1) 4-mode compare, RAE-CFG coupled = ON (already computed last run → npz cached, no resample).
-for mode in shared split null traj; do
-    run_combo "$mode" 2.0 0.0 1.0
-    run_combo "$mode" 2.5 0.0 1.0
-done
+if [ -z "$PIX_TS" ]; then
+    # ===== pix_ts = 1.0 (config default) blocks =====
+    # (1) 4-mode compare, RAE-CFG coupled = ON (npz cached from earlier → no resample).
+    for mode in shared split null traj; do
+        run_combo "$mode" 2.0 0.0 1.0
+        run_combo "$mode" 2.5 0.0 1.0
+    done
 
-# (2) Decoupled RAE/Pixel CFG (null mode). The sibling branch rae-pixel-cfg-split
-#     ALREADY found rae_cfg=1.0 (RAE fully off) is TOO WEAK; the sweet spot is
-#     pix_cfg > rae_cfg (Pixel wants stronger guidance than RAE), both > 1.
-#     So sweep that region around our model's 2-3 range, NOT the rae=1.0 extreme.
-#     run_combo MODE PIX_CFG T_MIN T_MAX RAE_CFG   (pix = 2nd arg, rae = 5th arg)
-for rae in 1.5 2.0 2.5; do
-    run_combo null 2.5 0.0 1.0 "$rae"
-    run_combo null 3.0 0.0 1.0 "$rae"
-done
-
-# (2b) the rae_cfg=1.0 "RAE off" extreme — already shown too weak; kept as 1 anchor
-#      (npz from the earlier run is cached, so this won't resample).
-run_combo null 2.5 0.0 1.0 1.0
+    # (2) Decoupled RAE/Pixel CFG (null). Sibling branch found rae_cfg=1.0 too weak; sweet
+    #     spot is pix_cfg >= rae_cfg, both > 1. Our data: rae=pix=2.5 (coupled) is best.
+    for rae in 1.5 2.0 2.5; do
+        run_combo null 2.5 0.0 1.0 "$rae"
+        run_combo null 3.0 0.0 1.0 "$rae"
+    done
+    run_combo null 2.5 0.0 1.0 1.0   # rae-off anchor (cached)
+else
+    # ===== FINAL combined round: at the best pix_ts (PIX_TS env), re-tune cfg + decouple =====
+    # pix_ts is the big lever (19.5 -> 16.8 and falling). Here we re-tune cfg at the best
+    # pix_ts (the cfg optimum may shift) and try a small decoupled probe (null mode).
+    run_combo null 2.0 0.0 1.0          # coupled 2.0
+    run_combo null 2.5 0.0 1.0          # coupled 2.5
+    run_combo null 3.0 0.0 1.0          # coupled 3.0
+    run_combo null 2.5 0.0 1.0 2.0      # decoupled pix2.5 / rae2.0
+    run_combo null 2.6 0.0 1.0 2.4      # decoupled pix2.6 / rae2.4
+    run_combo null 2.5 0.0 1.0 3.0      # decoupled pix2.5 / rae3.0 (rae>pix)
+fi
 
 echo ""
 echo "========================================"
