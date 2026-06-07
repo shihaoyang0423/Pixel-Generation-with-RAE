@@ -393,8 +393,10 @@ if __name__ == "__main__":
                         help="Override CFG guidance scale from config.")
     parser.add_argument("--t-min", type=float, default=None)
     parser.add_argument("--t-max", type=float, default=None)
-    parser.add_argument("--s-clean-cfg-mode", type=str, choices=["shared", "split", "null"], default="shared",
-                        help="How CFG builds s_clean for cond/uncond Pixel batches.")
+    parser.add_argument("--s-clean-cfg-mode", type=str, choices=["shared", "split", "null", "traj"], default="shared",
+                        help="How CFG builds s_clean for cond/uncond Pixel batches. "
+                             "traj = run Phase 1 as two independent cond/uncond RAE trajectories "
+                             "(uncond s_clean from a genuinely unconditional latent).")
     parser.add_argument("--naive", action="store_true",
                         help="Ignored (project version always uses Euler; kept for CLI compat).")
 

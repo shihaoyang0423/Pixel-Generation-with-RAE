@@ -35,6 +35,15 @@ todos:
   - id: null-vs-shared-ablation
     content: 同 ckpt/cfg/pix_ts 下比 null vs shared(vs split)，隔离出 null_s_clean（Pixel-side CFG）的净增益
     status: pending
+  - id: split-mode-sweep
+    content: 方案2——uncond 用 y_null 提取的 s_clean（= 已实现的 split 模式，无需新代码），纳入对照 sweep
+    status: pending
+  - id: dual-traj-mode
+    content: 方案1.A——新增 s_clean_cfg_mode=traj：Phase1 跑 cond/uncond 两条独立 RAE 轨迹，uncond s_clean 来自真·无条件 latent（sampling-only，任意 ckpt 可用）
+    status: completed
+  - id: dual-traj-sweep
+    content: 在 ep60/ep100 ckpt 上跑 traj 模式的 cfg×pix_ts sweep，与 split/null/shared 对照
+    status: pending
   - id: fid50k-final
     content: 在 ep100 最优 ckpt 上用最优 (cfg, pix_ts, null) 跑 FID50k，并对 baseline 同口径对照
     status: pending
@@ -92,6 +101,50 @@ Phase 2 给 uncond 半边的 s_clean 有三种取法（均已实现，`--s-clean
 
 - `split` 是**推理期**技巧，把真实 `x_rae_clean` 再过一遍 encoder、只把 label 置空。模型训练时**从没见过**这种 s_clean，多少有点 out-of-distribution。
 - `null` 是**训练期**方案：给 s_clean 一个专门的、可学习的 ∅，训练时随 y dropout 同步置空，模型 in-distribution 地学到一个真正的“无条件 s_clean”，和 y_embedder 的第 1000 号空类完全对称。
+
+## 两个 sampling 级实验：方案1（双轨 uncond）/ 方案2（split）
+
+两个都只动采样、不动训练、不用重训。它们和 shared/split/null 一起，构成"uncond 的 s_clean 有多无条件"的一条谱：
+
+| 模式 | uncond 的 s_clean | uncond latent | 需 null token | 状态 |
+|---|---|---|---|---|
+| `shared` | 复用 cond（= extract(x_guided, y_class)） | = cond（CFG-guided） | 否 | 已实现 |
+| `split`（**方案2**） | extract(x_guided, **y_null**)（同一 latent，只丢类别） | = cond（CFG-guided） | 否 | **已实现** |
+| `traj`（**方案1.A**） | extract(**x_uncond**, y_null)（独立无条件轨迹） | **独立无条件 latent** | 否 | **新增已实现** |
+| `null` | 学到的空白 ∅ | —（不经 latent） | 是 | 已实现 |
+
+### 方案2 = 已实现的 `split`
+
+"空 s_clean 来自 y_null、正常 s_clean 来自 y_label"，正是 `split`：cond/uncond 用**同一个** Phase-1 guided latent，只是 encoder 的 label 一个真类、一个 null。直接 `--s-clean-cfg-mode split` 即可，无需新代码。
+
+### 方案1 = 新增 `traj`（双轨）
+
+Phase 1 **不做 CFG 混合**，让 `[y_class, y_null]` 两半各自演化成两个不同的干净 latent：cond 半 → conditional latent，uncond 半 → unconditional latent；再各自 extract 出 s_clean，Phase 3 正常做 Pixel CFG。
+
+- 比 `split` 更彻底：uncond 的 **latent 和 label 都无条件**（split 是同一条件 latent + 假 null 标签，有 latent/label 失配）。
+- **不依赖 null token，任意 ckpt 可用**——可在无 null token 的 baseline 上也做出 Pixel-CFG，从而和"训练出来的 null"公平对比。
+
+**A / B 两版**
+
+| 版本 | cond 半 latent | 每步算力 | 备注 |
+|---|---|---|---|
+| **A（已实现）** | 纯 conditional（forward_rae，不混） | 1×（同现在） | cond latent 不锐化；guidance 全交给 Phase 3 |
+| B（未实现） | CFG 锐化（cond x 上额外算 y_null 速度） | ~1.5× | cond latent 锐度同现在，但 Phase1+Phase3 CFG 叠两层，可能过锐 |
+
+当前实现的是 **A 版**：`s_clean_cfg_mode != "traj"` 时走原 `forward_rae_with_cfg`；`== "traj"` 时 Phase 1 改用不混合的 `forward_rae`，Phase 2 的 uncond 用 `x_rae_clean[B:]`（无条件轨迹）提取。代码点：`project_sample_ode_naive`（Phase 1 分支 + Phase 2 `traj` 分支）、`--s-clean-cfg-mode` 新增 `traj` 选项。
+
+### 采样命令（任意已有 ckpt，含 baseline）
+
+```bash
+torchrun ... src/sample_pix_ddt_project_free_layer.py \
+  --config <采样config> --ckpt <ckpt> --sample-dir <out> \
+  --num-fid-samples 5000 --per-proc-batch-size 64 --precision fp32 \
+  --label-sampling equal --naive \
+  --cfg-scale 2.5 --s-clean-cfg-mode traj      # 方案1.A
+  # 或 --s-clean-cfg-mode split                 # 方案2
+```
+
+> 注：`traj` 当前是 A 版（cond latent 不再被 Phase-1 CFG 锐化）。若 traj 反而比 shared/null 差，可能就是丢了这层锐化，再考虑实现 B 版。
 
 ## null_s_clean 的具体实现
 

@@ -253,11 +253,15 @@ def project_sample_ode_naive(
         t_rae_batch = t_rae_scalar.repeat(B_full)
         dt_ds_rae = get_dt_ds(s_curr, transport_rae.time_dist_shift)
 
-        if using_cfg:
+        if using_cfg and s_clean_cfg_mode != "traj":
             model_out_rae = model.forward_rae_with_cfg(
                 x_rae, t_rae_batch, y, cfg_scale=cfg_scale, cfg_interval=cfg_interval
             )
         else:
+            # traj mode (方案1.A): do NOT CFG-blend Phase 1 — let the cond half
+            # (y_class) and uncond half (y_null) evolve as two independent RAE
+            # trajectories so they reach DIFFERENT clean latents. (Also the plain
+            # non-CFG path.)
             model_out_rae = model.forward_rae(x_rae, t_rae_batch, y)
 
         drift_rae_dt = compute_ode_drift(transport_rae, x_rae, t_rae_batch, model_out_rae)
@@ -270,10 +274,13 @@ def project_sample_ode_naive(
 
     # -----------------------------------------------------------------------
     # Phase 2: Extract clean conditioning features from denoised RAE
-    # With CFG, choose whether the uncond batch slot reuses class-conditioned
-    # s_clean (shared), gets y_null-conditioned s_clean (split), or receives
-    # a learned null s_clean token (null).
-    # x_rae_clean[:B] and x_rae_clean[B:] are equal after Phase 1 CFG guidance.
+    # With CFG, choose how the uncond batch slot's s_clean is built:
+    #   shared — reuse cond's class-conditioned s_clean
+    #   split  — same (CFG-guided) latent, but extract with y_null
+    #   null   — learned null s_clean token
+    #   traj   — 方案1.A: extract from the SEPARATE unconditional RAE trajectory
+    # For shared/split/null, Phase 1 CFG-blends so x_rae_clean[:B] == x_rae_clean[B:].
+    # For traj, Phase 1 is NOT blended, so the two halves are DIFFERENT latents.
     # -----------------------------------------------------------------------
     if using_cfg:
         B = B_full // 2
@@ -289,6 +296,14 @@ def project_sample_ode_naive(
         elif s_clean_cfg_mode == "null":
             s_clean_uncond = model.get_null_s_clean(B, device=s_clean_cond.device, dtype=s_clean_cond.dtype)
             s_clean = torch.cat([s_clean_cond, s_clean_uncond], dim=0)    # [2B, L, C_enc]
+        elif s_clean_cfg_mode == "traj":
+            # 方案1.A: uncond s_clean comes from the unconditional RAE trajectory
+            # (x_rae_clean[B:], evolved under y_null without CFG blend), not the
+            # conditional half. Both latent AND label are unconditional.
+            y_uncond = y[B:]
+            x_rae_uncond = x_rae_clean[B:]
+            s_clean_uncond = model.extract_clean_s(x_rae_uncond, y_uncond)  # [B, L, C_enc]
+            s_clean = torch.cat([s_clean_cond, s_clean_uncond], dim=0)      # [2B, L, C_enc]
         else:
             raise ValueError(f"Unknown s_clean_cfg_mode: {s_clean_cfg_mode!r}")
     else:

@@ -1,7 +1,9 @@
 #!/bin/bash
-# CFG sweep (FID5k) for the 6x768 [2] null_s_clean model, s-clean-cfg-mode=null.
-# Sweeps cfg_scale on a fixed checkpoint/config; uses sample_pix_ddt_project_free_layer.py.
-# Run from RAE/ root:  bash cfg_sweep_null768_ep60.sh
+# 4-mode s_clean CFG comparison (FID5k) for the 6x768 [2] null_s_clean model.
+# Runs --s-clean-cfg-mode in {shared, split, null, traj} at fixed cfg scales,
+# so one `bash` gives all four experiments side by side.
+# Uses sample_pix_ddt_project_free_layer.py.  Run from RAE/ root:
+#   bash cfg_sweep_null768_ep60.sh
 
 set -e
 
@@ -11,7 +13,7 @@ SOURCE_EXPERIMENT=PixDDT_small_v2_project_free_layer_1_3_5_7_false_wo_lora_w_y_e
 CKPT_ROOT=/home/shihaoyang/data/ckpts/PixDDTv2/${SOURCE_EXPERIMENT}
 CKPT=${CKPT_ROOT}/checkpoints/ep-0000060.pt
 CONFIG=configs/stage2/sampling/ImageNet256/PixDDT_free_layer_2_wo_lora_w_y_embed_adaln_zero_6_768_DiTDHS_null_s_clean.yaml
-SAMPLE_BASE=/home/shihaoyang/data/samples/null768_ep60/cfg_sweep
+SAMPLE_BASE=/home/shihaoyang/data/samples/null768_ep60/mode_compare
 REF=/home/shihaoyang/data/data/VIRTUAL_imagenet256_labeled.npz
 NPROC=8
 NUM_FID_SAMPLES=5000
@@ -19,10 +21,10 @@ BATCH_SIZE=64
 PRECISION=fp32
 
 mkdir -p "$SAMPLE_BASE"
-RESULTS_FILE="$SAMPLE_BASE/fid_results_cfg.txt"
+RESULTS_FILE="$SAMPLE_BASE/fid_results_modes.txt"
 
 echo "" >> "$RESULTS_FILE"
-echo "--- cfg sweep (s_clean mode=null), pix_ts from config (=1.0) ---" >> "$RESULTS_FILE"
+echo "--- 4-mode s_clean compare (shared/split/null/traj), pix_ts from config (=1.0) ---" >> "$RESULTS_FILE"
 echo "ckpt: $CKPT" >> "$RESULTS_FILE"
 echo "config: $CONFIG" >> "$RESULTS_FILE"
 printf "%-8s  %-8s  %-8s  %-8s  %s\n" "mode" "scale" "t_min" "t_max" "FID5k" >> "$RESULTS_FILE"
@@ -75,12 +77,12 @@ run_combo() {
     printf "%-8s  %-8s  %-8s  %-8s  %s\n" "$mode" "$scale" "$t_min" "$t_max" "$fid_val" >> "$RESULTS_FILE"
 }
 
-# scale=1.0 → w/o CFG baseline (mode irrelevant when scale==1.0); rest are CFG on.
-run_combo null 1.0 0.0 1.0
-run_combo null 1.5 0.0 1.0
-run_combo null 2.0 0.0 1.0
-run_combo null 2.5 0.0 1.0
-run_combo null 3.0 0.0 1.0
+# 4 modes x 2 cfg scales (2.0, 2.5) bracketing null's optimum; pix_ts=1.0 from config.
+# (Each run is independent; tags differ by mode+scale so no npz collision.)
+for mode in shared split null traj; do
+    run_combo "$mode" 2.0 0.0 1.0
+    run_combo "$mode" 2.5 0.0 1.0
+done
 
 echo ""
 echo "========================================"
