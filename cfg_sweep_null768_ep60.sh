@@ -97,14 +97,19 @@ for mode in shared split null traj; do
     run_combo "$mode" 2.5 0.0 1.0
 done
 
-# (2) NEW: RAE-CFG OFF (rae_cfg=1.0), Pixel-CFG on. Phase 1 = single natural conditional
-#     latent; tests whether the un-sharpened latent gives a more in-distribution s_clean.
-for mode in null split; do
-    run_combo "$mode" 1.5 0.0 1.0 1.0
-    run_combo "$mode" 2.0 0.0 1.0 1.0
-    run_combo "$mode" 2.5 0.0 1.0 1.0
-    run_combo "$mode" 3.0 0.0 1.0 1.0
+# (2) Decoupled RAE/Pixel CFG (null mode). The sibling branch rae-pixel-cfg-split
+#     ALREADY found rae_cfg=1.0 (RAE fully off) is TOO WEAK; the sweet spot is
+#     pix_cfg > rae_cfg (Pixel wants stronger guidance than RAE), both > 1.
+#     So sweep that region around our model's 2-3 range, NOT the rae=1.0 extreme.
+#     run_combo MODE PIX_CFG T_MIN T_MAX RAE_CFG   (pix = 2nd arg, rae = 5th arg)
+for rae in 1.5 2.0 2.5; do
+    run_combo null 2.5 0.0 1.0 "$rae"
+    run_combo null 3.0 0.0 1.0 "$rae"
 done
+
+# (2b) the rae_cfg=1.0 "RAE off" extreme — already shown too weak; kept as 1 anchor
+#      (npz from the earlier run is cached, so this won't resample).
+run_combo null 2.5 0.0 1.0 1.0
 
 echo ""
 echo "========================================"
