@@ -182,6 +182,7 @@ def project_sample_ode_naive(
     num_steps=50,
     cfg_scale=1.0,
     cfg_interval=(0.0, 1.0),
+    rae_cfg_scale=None,        # None → couple RAE-CFG to cfg_scale (current behaviour)
     s_clean_cfg_mode="shared",
     verbose=False,
     **kwargs
@@ -203,6 +204,19 @@ def project_sample_ode_naive(
     device = z_pix.device
     using_cfg = cfg_scale > 1.0
     y = kwargs['y']
+
+    # RAE-stream CFG (Phase 1) can be decoupled from Pixel-stream CFG (Phase 3).
+    # rae_cfg_scale=None → couple to cfg_scale (unchanged). rae_cfg_eff<=1.0 → RAE-CFG OFF.
+    rae_cfg_eff = cfg_scale if rae_cfg_scale is None else rae_cfg_scale
+    rae_cfg_on = using_cfg and (rae_cfg_eff > 1.0) and (s_clean_cfg_mode != "traj")
+    # When Pixel-CFG is on but RAE-CFG is OFF (and not traj), denoise BOTH halves
+    # conditionally so Phase 1 yields the SAME natural conditional latent for cond/uncond
+    # (no CFG sharpening, no traj-style image divergence).
+    if using_cfg and not rae_cfg_on and s_clean_cfg_mode != "traj":
+        _Bh = B_full // 2
+        y_phase1 = torch.cat([y[:_Bh], y[:_Bh]], dim=0)
+    else:
+        y_phase1 = y
 
     def get_t(s, shift):
         return shift * s / (1 + (shift - 1) * s)
@@ -253,16 +267,16 @@ def project_sample_ode_naive(
         t_rae_batch = t_rae_scalar.repeat(B_full)
         dt_ds_rae = get_dt_ds(s_curr, transport_rae.time_dist_shift)
 
-        if using_cfg and s_clean_cfg_mode != "traj":
+        if rae_cfg_on:
             model_out_rae = model.forward_rae_with_cfg(
-                x_rae, t_rae_batch, y, cfg_scale=cfg_scale, cfg_interval=cfg_interval
+                x_rae, t_rae_batch, y_phase1, cfg_scale=rae_cfg_eff, cfg_interval=cfg_interval
             )
         else:
-            # traj mode (方案1.A): do NOT CFG-blend Phase 1 — let the cond half
-            # (y_class) and uncond half (y_null) evolve as two independent RAE
-            # trajectories so they reach DIFFERENT clean latents. (Also the plain
-            # non-CFG path.)
-            model_out_rae = model.forward_rae(x_rae, t_rae_batch, y)
+            # RAE-CFG OFF. Three sub-cases share this plain forward:
+            #  - traj (方案1.A): y_phase1=[y_class, y_null] → two divergent trajectories
+            #  - rae-cfg-off (non-traj): y_phase1=[y_class, y_class] → same conditional latent
+            #  - no Pixel-CFG at all: y_phase1=y (conditional)
+            model_out_rae = model.forward_rae(x_rae, t_rae_batch, y_phase1)
 
         drift_rae_dt = compute_ode_drift(transport_rae, x_rae, t_rae_batch, model_out_rae)
         x_rae = x_rae + drift_rae_dt * (dt_ds_rae * ds)

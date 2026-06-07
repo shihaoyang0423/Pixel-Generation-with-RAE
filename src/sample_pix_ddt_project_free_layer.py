@@ -333,6 +333,7 @@ def main(args: argparse.Namespace) -> None:
                 num_steps=num_steps,
                 cfg_scale=guidance_scale,
                 cfg_interval=(t_min, t_max),
+                rae_cfg_scale=args.rae_cfg_scale,
                 s_clean_cfg_mode=s_clean_cfg_mode,
                 verbose=False,
                 y=sample_y,
@@ -397,6 +398,11 @@ if __name__ == "__main__":
                         help="How CFG builds s_clean for cond/uncond Pixel batches. "
                              "traj = run Phase 1 as two independent cond/uncond RAE trajectories "
                              "(uncond s_clean from a genuinely unconditional latent).")
+    parser.add_argument("--rae-cfg-scale", type=float, default=None,
+                        help="Decouple Phase-1 (RAE) CFG scale from the Pixel CFG scale. "
+                             "None (default) = couple to --cfg-scale (current behaviour); "
+                             "1.0 = RAE-CFG OFF (Phase 1 = a single natural conditional latent), "
+                             "while Pixel CFG still uses --cfg-scale. Ignored when mode=traj.")
     parser.add_argument("--naive", action="store_true",
                         help="Ignored (project version always uses Euler; kept for CLI compat).")
 

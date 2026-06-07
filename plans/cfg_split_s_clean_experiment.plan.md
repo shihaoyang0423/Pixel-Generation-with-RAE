@@ -42,7 +42,13 @@ todos:
     content: 方案1.A——新增 s_clean_cfg_mode=traj：Phase1 跑 cond/uncond 两条独立 RAE 轨迹，uncond s_clean 来自真·无条件 latent（sampling-only，任意 ckpt 可用）
     status: completed
   - id: dual-traj-sweep
-    content: 在 ep60/ep100 ckpt 上跑 traj 模式的 cfg×pix_ts sweep，与 split/null/shared 对照
+    content: ep60 四模式对照已跑——traj 灾难性变差（cfg 越大越糟），根因是两条轨迹分叉成两张不同的图；null 干净胜出
+    status: completed
+  - id: decouple-rae-cfg
+    content: 实现 --rae-cfg-scale，把 Phase1(RAE) 与 Phase3(Pixel) 的 CFG scale 解耦（默认耦合，1.0=RAE 关）
+    status: completed
+  - id: rae-cfg-off-sweep
+    content: 跑 RAE-CFG OFF × Pixel-CFG 的 sweep（null/split），看不锐化的 latent 是否给更 in-distribution 的 s_clean、刷新最优
     status: pending
   - id: fid50k-final
     content: 在 ep100 最优 ckpt 上用最优 (cfg, pix_ts, null) 跑 FID50k，并对 baseline 同口径对照
@@ -145,6 +151,44 @@ torchrun ... src/sample_pix_ddt_project_free_layer.py \
 ```
 
 > 注：`traj` 当前是 A 版（cond latent 不再被 Phase-1 CFG 锐化）。若 traj 反而比 shared/null 差，可能就是丢了这层锐化，再考虑实现 B 版。
+
+## ep60 四模式对照结果（FID5k, pix_ts=1.0）
+
+| mode | cfg 2.0 | cfg 2.5 |
+|---|---|---|
+| **null** | 19.92 | **19.53** |
+| shared | 24.69 | 22.54 |
+| split | 24.96 | 23.12 |
+| traj | 37.46 | 43.31（cfg 越大越糟） |
+
+**结论(都在同模型、RAE-CFG 都开的前提下):**
+- **核心假设成立**:`null` 干净地赢 `shared`/`split` 约 **3 个 FID**。这 ~3 就是可学习 ∅(Pixel-side CFG)的净贡献——训练一个 ∅ 确实让 Pixel Head 做出了真正有效的 CFG。
+- `null` 与之前 cfg sweep 一字不差 = 可复现性 sanity check 通过。
+- `shared ≈ split`:非训练手段拿不到这块增益。
+
+### traj 为什么灾难（根因，非 bug）
+
+两个原因叠加：
+1. **丢了 RAE-CFG**:traj 的 Phase 1 不做 CFG 混合,cond latent 没被锐化(A 版固有代价)。
+2. **cond/uncond 是两张不同的图**(致命):同一噪声在 y_class / y_null 下去噪分叉成图 A / 图 B,于是 `s_clean_cond`(图A)与 `s_clean_uncond`(图B)描述不同的图,Pixel CFG 的 `cond−uncond` 变成"图A−图B"的无意义方向 → cfg 越大越糟(37→43)。
+
+**B 版也救不了**:可证 `traj-B 的 cond 路 = split 的 cond 路`,唯一区别是 traj-B 的 uncond 来自另一张图(比 split 的"同图丢类别"更脏)→ `traj-B ≥ split > null`,必输。所以 traj/traj-B 是死路,根因②无解。
+
+> 反过来这正好说明:队友想要的"好 s_clean vs 坏 s_clean 做 CFG"是对的,但"坏 s_clean"不能用另一张图来凑——它的正确形态就是训练出来的 ∅(= `null`),而 `null` 就是赢家。
+
+## RAE-CFG 解耦（"RAE 不开 CFG"实验）
+
+队友另一个想法:把 Phase 1(RAE)和 Phase 3(Pixel)的 CFG **解耦**,让 RAE 流可以**不开** CFG。
+
+**理论动机(为什么有希望):** 训练时 Pixel Head 的 s_clean 来自 `extract(x1_rae, y)`,而 `x1_rae` 是**真实图像**的 DINOv2 编码(自然分布)。推理时若 RAE-CFG 开,Phase 1 的 latent 被 CFG **过度锐化**,偏离真实 latent 分布 → s_clean 对 Pixel Head 偏 OOD;**RAE-CFG 关**则得到一张自然条件 latent,s_clean 更 in-distribution,**可能反而更好**。且它**没有 traj 的"两张图"问题**(Phase 1 仍只产一张条件图,cond/uncond 对照交给 Pixel 流的 null/split)。
+
+**实现(已完成):** `project_sample_ode_naive` 新增 `rae_cfg_scale`，CLI `--rae-cfg-scale`：
+- `None`(默认)→ 耦合到 `--cfg-scale`,行为完全不变。
+- `1.0` → RAE-CFG **关**:Phase 1 用 `forward_rae`、两半都喂 `y_class`(`y_phase1=[y_class,y_class]`)→ 得到**同一张自然条件 latent**(无锐化、无分叉);Pixel 流仍用 `--cfg-scale` 做 CFG。
+- `> 1.0` → RAE-CFG 开,scale 独立于 Pixel。
+- `traj` 模式忽略此参数(它自成一路)。
+
+**待跑 sweep:** `cfg_sweep_null768_ep60.sh` 已加第 (2) 段——`null/split` 模式 × `rae_cfg=1.0(关)` × `pix_cfg ∈ {1.5,2.0,2.5,3.0}`。和第 (1) 段(RAE-CFG 开)同表对比,看关掉 RAE-CFG 能否把 19.5 再压低。
 
 ## null_s_clean 的具体实现
 
