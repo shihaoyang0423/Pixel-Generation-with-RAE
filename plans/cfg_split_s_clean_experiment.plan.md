@@ -16,7 +16,7 @@ isProject: false
 
 # CFG s_clean 方法说明
 
-## 总览：串行去噪管线
+## 总览
 
 ```text
 Phase 1  RAE ODE       纯噪声 z_rae → DiTDH 去噪 → 干净 DINOv2 latent x_rae_clean [B,768,16,16]
@@ -39,11 +39,16 @@ Phase 3  Pixel ODE      纯噪声 z_pix → Pixel Head（固定条件 s_clean）
 
 Pixel Head 架构开关：`use_swiglu=true`、`use_rope=true`、`use_rmsnorm=true`、`use_qknorm=false`、`use_adaln_zero=true`、`use_y_embedder=true`、`use_lora=false`。
 
-**注入层 `rae_inject_layers=[2]`、`rae_inject_final_layer=false`**：6 层 Pixel Head 里**只有第 2 层吃 s_clean**，其余 5 层用 `t+y`（时间步 + 类别标签）做 AdaLN 条件。这一点很重要——它决定了 s_clean 在整个网络里的影响范围只有 1 层。
+**注入层 `rae_inject_layers=[2]`、`rae_inject_final_layer=false`**：6 层 Pixel Head 里**只有第 2 层吃 s_clean**，其余 5 层用 `t+y`（时间步 + 类别标签）做 AdaLN 条件。
 
 ### RAE 与 CFG
 
-RAE backbone（DiTDH-S）是冻结的，只负责把干净 latent 编码成 s_clean。模型唯一要学的是 Pixel Head（外加下面的 null s_clean token）。训练通过 **class dropout** 让模型见到“无条件”样本，从而学到无条件分支——这是采样时能做 CFG 的前提。RAE 流是否在采样时开 CFG，是采样侧的选择（见第二部分），与训练无关。
+RAE backbone（DiTDH-S）是冻结的。训练中它有两个用途：
+
+- 用 `x1_rae`（真实图像经 Stage-1 RAE/DINOv2 编码得到的干净 latent）提取 `s_clean`，作为 Pixel Head 条件。
+- 额外跑一条 RAE denoising branch 并计算 `loss_rae`。当前配置 `use_lora=false`，RAE/DiTDH 参数冻结且 forward 在 `torch.no_grad()` 下，所以这条 loss 不更新 RAE backbone；主要训练对象仍是 Pixel Head + `null_s_clean`。
+
+RAE 流是否在采样时开 CFG，是采样侧的选择（见第二部分），与训练无关。
 
 ### s_clean 如何置空
 
@@ -65,11 +70,38 @@ imgs    = forward_pix(x_pix, t_pix, y, s_clean, force_drop_ids)  # ③ Pixel Hea
 ```
 
 三者严格同步，所以**被 drop 的样本同时丢掉类别标签和 RAE 语义条件**，对应真正的无条件分支，与 y_embedder 的第 1000 号空类完全对称。
-`where(...)` 每一步都执行（即使该 micro-batch 无人被 drop），保证 `null_s_clean` 每步都在计算图里、拿得到梯度（否则 DDP 会因“参数未收到梯度”报错）。
+`where(...)` 每一步都执行（即使该 micro-batch 无人被 drop），保证 `null_s_clean` 每步都在计算图里、拿得到梯度。
+
+对应代码：
+
+- `null_s_clean`：`src/stage2/models/PixelDDTv2_project_free_layer.py:238-243`
+- dropout mask：`_sample_cfg_drop_ids`，`src/stage2/models/PixelDDTv2_project_free_layer.py:391-395`
+- null token 与 `torch.where`：`src/stage2/models/PixelDDTv2_project_free_layer.py:397-415`
+- clean bottleneck 提取：`_extract_clean_s` / `extract_clean_s`，`src/stage2/models/PixelDDTv2_project_free_layer.py:450-481`
+- training forward 同步置空：`src/stage2/models/PixelDDTv2_project_free_layer.py:610-631`
+
+```mermaid
+flowchart TB
+    y["label y"] --> d["force_drop_ids<br/>one mask"]
+    x1["x1_rae clean latent"] --> enc["_extract_clean_s(x1_rae,y,mask)"]
+    d --> enc
+    enc --> sc["s_clean"]
+    d --> wh["_apply_s_clean_null_token<br/>torch.where(mask,null_s,s_clean)"]
+    ns["learned null_s_clean"] --> wh
+    sc --> wh
+    wh --> fp["forward_pix(..., s_clean, mask)"]
+    d --> fp
+```
 
 ### 训练调度
 
-`time_dist_type=logit-normal_0.8_0.8`；pixel/RAE 两条流各自的 time_shift（`misc.time_dist_shift_dim` / `misc_rae.time_dist_shift_dim`）；从头训（只加载冻结 backbone，pixel head 随机初始化）。
+两条流配置不同：
+
+- Pixel transport：`prediction=data`、`loss_weight=velocity`、`time_dist_type=logit-normal_0.8_0.8`。
+- RAE transport：`prediction=velocity`、`loss_weight=null`、`time_dist_type=logit-normal_0_1`。
+- pixel/RAE 两条流各自的 time_shift（`misc.time_dist_shift_dim` / `misc_rae.time_dist_shift_dim`）；从头训（只加载冻结 backbone，pixel head 随机初始化）。
+
+对应配置见 `configs/stage2/training/PixelDDT_free_layer_2_wo_lora_w_y_embed_adaln_zero_6_768_DiTDHS_null_s_clean.yaml:66-108`。
 
 ---
 
@@ -93,28 +125,81 @@ CFG 有**两个**施加点，强度可解耦：
 
 > Pixel Head 里只有第 2 层吃 s_clean、其余 5 层吃 y，所以 Pixel-CFG 的大部分其实是标准的 **y-CFG**（类别标签），只有第 2 层走 **s_clean-CFG**。下面四种模式只改变第 2 层 uncond 半边的 s_clean。
 
+对应代码：
+
+- 独立采样脚本读取 `--cfg-scale` / `--t-min` / `--t-max` / `--s-clean-cfg-mode`：`src/sample_pix_ddt_project_free_layer.py:239-257`
+- 采样脚本把 `z_pix/z_rae/y` 扩成 `[cond; uncond]` 并调用 `project_sample_ode_naive`：`src/sample_pix_ddt_project_free_layer.py:317-338`
+- CLI 选项 `--s-clean-cfg-mode` 与 `--rae-cfg-scale`：`src/sample_pix_ddt_project_free_layer.py:397-405`
+- RAE-CFG 是否开启、`rae_cfg_scale` 解耦、`traj` 特判：`src/train_stage3_projcet_free_layer.py:176-219`
+- Phase 1 RAE ODE：`src/train_stage3_projcet_free_layer.py:253-287`
+- Phase 2 四种 `s_clean_cfg_mode` 分支：`src/train_stage3_projcet_free_layer.py:289-324`
+- Phase 3 Pixel ODE：`src/train_stage3_projcet_free_layer.py:326-350`
+- CFG mask 公式在模型 forward 中实现：RAE `src/stage2/models/PixelDDTv2_project_free_layer.py:639-658`，Pixel `src/stage2/models/PixelDDTv2_project_free_layer.py:660-678`
+
+CFG 混合真实实现如下（两路结构相同，区间外返回 cond）：
+
+```python
+mask = ((t_half >= guid_t_min) & (t_half <= guid_t_max))
+half_eps = torch.where(
+    mask,
+    uncond_eps + cfg_scale * (cond_eps - uncond_eps),
+    cond_eps,
+)
+```
+
+`s_clean` 只进入被注入的 Pixel block。当前 `[2]` 配置的真实分支在 `src/stage2/models/PixelDDTv2_project_free_layer.py:563-588`：
+
+```python
+s_trans_rae_list = [proj(silu(t_pix + s_clean)) for proj in self.s_projectors]
+s_trans_t_only_list = [proj(silu(t_pix + y_emb)) for proj in self.s_projectors]
+
+if self._inject_set is None or global_i in self._inject_set:
+    c = s_trans_rae_list[si]      # layer 2 only in current config
+else:
+    c = s_trans_t_only_list[si]   # other layers use t+y
+```
+
 ### 四种 s_clean 构造（`--s-clean-cfg-mode`）
 
-cond 半边的 s_clean 总是 `extract(条件 latent, y_class)`；四种模式区别在**uncond 半边的 s_clean 怎么来**：
+cond 半边的 s_clean 总是 `extract(条件 latent, y_class)`；四种模式区别在**uncond 半边的 s_clean 怎么来**。下表里的 `x_phase1` 指 Phase 1 输出的同一个条件 latent：默认是 RAE-CFG 混合后的 latent；若 `--rae-cfg-scale 1.0`，则是不混合、两半同喂 `y_class` 得到的自然条件 latent。
 
 | 模式 | cond s_clean | uncond s_clean | uncond 与 cond 同一张图? | 需 null token |
 |---|---|---|---|---|
-| `shared` | extract(x_guided, y_class) | = cond（直接复用） | 是 | 否 |
-| `split` | extract(x_guided, y_class) | extract(**x_guided**, **y_null**) | 是（同 latent，只换 label） | 否 |
+| `shared` | extract(x_phase1, y_class) | = cond（直接复用） | 是 | 否 |
+| `split` | extract(x_phase1, y_class) | extract(**x_phase1**, **y_null**) | 是（同 latent，只换 label） | 否 |
 | `traj` | extract(**x_c**, y_class) | extract(**x_u**, **y_null**) | **否（两张不同的图）** | 否 |
-| `null` | extract(x_guided, y_class) | **learned `null_s_clean`（∅）** | —（不经 latent） | 是 |
+| `null` | extract(x_phase1, y_class) | **learned `null_s_clean`（∅）** | —（不经 latent） | 是 |
 
 逐个说明：
 
 - **`shared`**：uncond 直接复用 cond 的 s_clean。第 2 层的 cond/uncond 条件相同，s_clean 对 CFG 方向零贡献，Pixel-CFG 实际只来自 y。最弱的 uncond。
 
-- **`split`**：cond 和 uncond 用**同一个** Phase-1 latent（CFG 的 `x_guided`），只是 extract 时一个 y_class、一个 y_null。uncond 仍带着该图的空间/语义内容，只是丢了类别条件(同一张图、去掉类别)。不需要 null token，任意 ckpt 可用。
+- **`split`**：cond 和 uncond 用**同一个** Phase-1 latent（默认是 RAE-CFG 后的 latent；RAE-CFG 关时是自然条件 latent），只是 extract 时一个 y_class、一个 y_null。uncond 仍带着该图的空间/语义内容，只是丢了类别条件(同一张图、去掉类别)。不需要 null token，任意 ckpt 可用。
 
 - **`traj`**：Phase 1 **不做 CFG 混合**，让 `[y_class, y_null]` 两半从同一噪声各自演化成两个**不同**的干净 latent：
   ```
   x_c = RAE-ODE(z_rae, y_class, 无CFG)   → s_clean_cond   = extract(x_c, y_class)
   x_u = RAE-ODE(z_rae, y_null,  无CFG)   → s_clean_uncond = extract(x_u, y_null)
   ```
-  特性：cond/uncond 的 s_clean 来自**两张不同的图**（不是同一张图的两种条件），且 cond latent 未经 RAE-CFG 锐化。不需要 null token、任意 ckpt 可用。
+  cond/uncond 的 s_clean 来自**两张不同的图**（不是同一张图的两种条件），且 cond latent 未经 RAE-CFG。不需要 null token、任意 ckpt 可用。
 
-- **`null`**：uncond 直接用训练学到的 `null_s_clean`（真正的“空白” ∅）。cond 仍用 CFG 后的 `x_guided` 提取。**需要 `use_s_clean_null_token=true` 训练出来的 ckpt**（否则缺参数）。这是与 y_embedder 第 1000 号空类对称的的无条件条件。
+- **`null`**：uncond 直接用训练学到的 `null_s_clean`（真正的“空白” ∅）。cond 仍用 Phase 1 的条件 latent 提取。**需要 `use_s_clean_null_token=true` 训练出来的 ckpt**（否则缺参数）。这是与 y_embedder 第 1000 号空类对称的的无条件条件。
+
+```mermaid
+flowchart TB
+    subgraph SharedSplitNull["shared / split / null"]
+      z["z_rae duplicated"] --> cfgrae["Phase 1 same-latent path<br/>CFG blend by default; no blend if rae_cfg<=1"]
+      cfgrae --> xp["x_phase1<br/>same latent for both halves"]
+      xp --> cond["cond: extract(x_phase1, y_class)"]
+      xp --> split["split: extract(x_phase1, y_null)"]
+      cond --> shared["shared: uncond = cond"]
+      learned["learned null_s_clean"] --> nullmode["null: uncond = learned ∅"]
+    end
+
+    subgraph Traj["traj"]
+      z2["z_rae duplicated"] --> xc["forward_rae(y_class)<br/>x_c"]
+      z2 --> xu["forward_rae(y_null)<br/>x_u"]
+      xc --> tc["cond: extract(x_c, y_class)"]
+      xu --> tu["uncond: extract(x_u, y_null)"]
+    end
+```
