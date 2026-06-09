@@ -125,8 +125,8 @@ training:
     weight_decay: 0.0
   scheduler:
     type: linear
-    warmup_epochs: 40
-    decay_end_epoch: 800
+    warmup_epochs: 50
+    decay_end_epoch: 100
     base_lr: 2.0e-4
     final_lr: 2.0e-5
     warmup_from_zero: false
