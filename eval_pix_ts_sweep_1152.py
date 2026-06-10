@@ -34,9 +34,23 @@ import yaml  # PyYAML (already available in the rae env)
 # USER SETTINGS — edit this section to control the sweep
 # =============================================================================
 
+# Env-override helper (mirrors EP). Accepts a float, or none/off/"" → None. Example:
+#   CFG_SCALE=1.5 PIX_TS="2,3,4" S_CLEAN_CFG_MODE=null python eval_pix_ts_sweep_1152.py
+def _env_float_or_none(name, default):
+    v = os.environ.get(name)
+    if v is None:
+        return default
+    if v.strip().lower() in ("", "none", "off", "nocfg"):
+        return None
+    return float(v)
+
 # List of pixel_time_shift values to test. The 1152 sampling config bakes pix_ts=3.0,
-# so probe around it. (GPU-tight first look — trim this list to go faster.)
-PIXEL_TIME_SHIFTS = [1.0, 2.0, 3.0, 4.0, 6.0]  # <-- modify here
+# so probe around it. Override with PIX_TS="2,3,4" (comma-separated). GPU-tight → trim it.
+_pix_ts_env = os.environ.get("PIX_TS")
+PIXEL_TIME_SHIFTS = (
+    [float(x) for x in _pix_ts_env.split(",") if x.strip()]
+    if _pix_ts_env else [1.0, 2.0, 3.0, 4.0, 6.0]
+)
 
 SOURCE_EXPERIMENT = (
     "PixDDT_project_free_layer_1_3_5_7_false_wo_lora_w_y_embed_adaln_zero_"
@@ -54,9 +68,22 @@ BASE_CONFIG = (
     "/PixDDT_free_layer_1_3_5_7_wo_lora_w_y_embed_adaln_zero_12_1152_DiTDHXL_null_s_clean_pix_ts3.yaml"
 )
 
-# Experiment root: results.txt is written here.
+# CFG / s_clean conditioning passed to the sampler — all env-overridable:
+#   CFG_SCALE=1.5         fixed CFG strength to sweep pix_ts at (CFG_SCALE=none → no CFG)
+#   S_CLEAN_CFG_MODE=null s_clean construction (null matches how this model trained)
+#   RAE_CFG_SCALE=1.0     decouple/turn-off RAE-CFG (none → couple to CFG_SCALE)
+CFG_SCALE = _env_float_or_none("CFG_SCALE", 2.0)
+S_CLEAN_CFG_MODE = os.environ.get("S_CLEAN_CFG_MODE", "null")
+RAE_CFG_SCALE = _env_float_or_none("RAE_CFG_SCALE", None)
+
+# Experiment root: results.txt is written here. The CFG settings are baked into the dir
+# name so different cfg/mode/rae runs don't collide — the sweep names npz only by pix_ts,
+# so a shared dir would SKIP sampling and re-report a stale cfg's numbers.
+_cfg_tag = "nocfg" if CFG_SCALE is None else f"cfg{CFG_SCALE:.2f}-{S_CLEAN_CFG_MODE}"
+if RAE_CFG_SCALE is not None:
+    _cfg_tag += f"-rae{RAE_CFG_SCALE:.2f}"
 EXPERIMENT_ROOT = os.path.expanduser(
-    f"~/data/samples/{SOURCE_EXPERIMENT}/pix_ts_sweep_ep{EP}"
+    f"~/data/samples/{SOURCE_EXPERIMENT}/pix_ts_sweep_ep{EP}_{_cfg_tag}"
 )
 # Sweep outputs (PNG dirs, NPZ files, logs) go under this subdirectory.
 SAMPLE_ROOT = os.path.join(EXPERIMENT_ROOT, "compare_different_pix_ts")
@@ -68,13 +95,6 @@ NPROC_PER_NODE = 8    # number of GPUs / torchrun processes
 BATCH_SIZE = 64       # --per-proc-batch-size
 NUM_FID_SAMPLES = 5000
 PRECISION = "fp32"
-
-# CFG / s_clean conditioning passed to the sampler.
-# CFG_SCALE = None → no CFG override (use config's guidance.scale). Set a float to sweep
-# pix_ts at a fixed CFG strength. S_CLEAN_CFG_MODE = "null" matches how this model trained.
-CFG_SCALE = 2.0
-S_CLEAN_CFG_MODE = "null"
-RAE_CFG_SCALE = None   # None = couple RAE-CFG to CFG_SCALE; set e.g. 1.0 to turn RAE-CFG off
 
 # Python executable with torch / numpy etc. (rae conda env)
 PYTHON = "/home/shihaoyang/miniconda3/envs/rae/bin/python"
