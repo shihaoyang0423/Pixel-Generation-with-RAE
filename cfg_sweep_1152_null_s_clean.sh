@@ -1,23 +1,23 @@
 #!/bin/bash
-# Sampling sweep (FID5k) for the 12x1152 [1,3,5,7] null_s_clean model @ ep30.
+# Sampling sweep (FID5k) for the 12x1152 [1,3,5,7] null_s_clean model (any checkpoint; pick epoch via EP=...).
 # Mirrors Xiuyuan/CFG_split_s_clean's cfg_sweep_null768_ep60.sh, adapted to the new
 # from-scratch 12x1152 / DiTDH-XL checkpoint. Uses sample_pix_ddt_project_free_layer.py.
 #
 # Run from RAE/ root:
-#   bash cfg_sweep_1152_null_s_clean_ep30.sh                # default block: no-CFG baseline +
+#   bash cfg_sweep_1152_null_s_clean.sh                # default block: no-CFG baseline +
 #                                                           #   null cfg-scale sweep + 4-mode compare
-#   DECOUPLE=1 bash cfg_sweep_1152_null_s_clean_ep30.sh     # RAE<->Pixel CFG decouple (rae-pixel-cfg-split)
-#   INTERVAL=1 bash cfg_sweep_1152_null_s_clean_ep30.sh     # CFG-interval [t_min,t_max] sweep
-#   PIX_TS=6  bash cfg_sweep_1152_null_s_clean_ep30.sh      # override pixel_time_shift (default = config's 3.0)
+#   DECOUPLE=1 bash cfg_sweep_1152_null_s_clean.sh     # RAE<->Pixel CFG decouple (rae-pixel-cfg-split)
+#   INTERVAL=1 bash cfg_sweep_1152_null_s_clean.sh     # CFG-interval [t_min,t_max] sweep
+#   PIX_TS=6  bash cfg_sweep_1152_null_s_clean.sh      # override pixel_time_shift (default = config's 3.0)
 #   EP=0000040 bash ...                                     # evaluate a different epoch checkpoint
 #
-# Env knobs (with defaults): EP=0000030, NPROC=8, NUM_FID_SAMPLES=5000, BATCH_SIZE=64.
+# Env knobs (with defaults): EP=0000050, NPROC=8, NUM_FID_SAMPLES=5000, BATCH_SIZE=64.
 
 set -e
 
 SOURCE_EXPERIMENT=${SOURCE_EXPERIMENT:-PixDDT_project_free_layer_1_3_5_7_false_wo_lora_w_y_embed_adaln_zero_12_1152_DiTDHXL_null_s_clean}
 CKPT_ROOT=/home/shihaoyang/data/ckpts/PixDDTv2/${SOURCE_EXPERIMENT}
-EP=${EP:-0000030}
+EP=${EP:-0000050}
 CKPT=${CKPT:-${CKPT_ROOT}/checkpoints/ep-${EP}.pt}
 CONFIG=${CONFIG:-configs/stage2/sampling/ImageNet256/PixDDT_free_layer_1_3_5_7_wo_lora_w_y_embed_adaln_zero_12_1152_DiTDHXL_null_s_clean_pix_ts3.yaml}
 
@@ -149,7 +149,7 @@ elif [ -n "$DECOUPLE" ]; then
         run_combo null 2.5 0.0 1.0 "$rae"
     done
 else
-    # ===== DEFAULT block: lean first look at ep30 (GPU-friendly) =====
+    # ===== DEFAULT block: lean first look at the chosen checkpoint (GPU-friendly) =====
     # (0) No-CFG baseline for comparison (pixcfg=1.00 → sampler runs a single conditional pass).
     run_combo null 1.0 0.0 1.0
 
@@ -158,13 +158,12 @@ else
     run_combo null 2.0 0.0 1.0
     run_combo null 2.5 0.0 1.0
 
-    # (2) 4-mode s_clean compare at a single representative scale (shared/split/null/traj).
-    for mode in shared split traj; do
-        run_combo "$mode" 2.0 0.0 1.0
-    done
-    # null @ 2.0 already sampled in block (1) — run_combo will SKIP the resample and just
-    # re-report its FID, so the 4-mode comparison row set is complete.
-    run_combo null 2.0 0.0 1.0
+    # (2) 4-mode s_clean compare — DISABLED: prior experiments found shared/split/traj
+    #     add little over plain null. Re-enable by uncommenting if you want the ablation back.
+    # for mode in shared split traj; do
+    #     run_combo "$mode" 2.0 0.0 1.0
+    # done
+    # run_combo null 2.0 0.0 1.0   # (null @ 2.0 already covered by block (1))
 fi
 
 echo ""

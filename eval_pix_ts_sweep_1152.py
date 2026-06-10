@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-eval_pix_ts_sweep_1152_ep30.py — Sweep pixel_time_shift and compute FID5k for each,
-for the 12x1152 [1,3,5,7] null_s_clean model @ ep30.
+eval_pix_ts_sweep_1152.py — Sweep pixel_time_shift and compute FID5k for each,
+for the 12x1152 [1,3,5,7] null_s_clean model (any checkpoint; pick epoch via the EP env var).
 
 Adapted from Xiuyuan/CFG_split_s_clean's eval_pix_ts_sweep.py. pixel_time_shift is
 derived from misc.time_dist_shift_dim / time_dist_shift_base:
@@ -10,7 +10,8 @@ This script patches the YAML's misc.time_dist_shift_dim for each target shift, r
 torchrun sampling, then computes FID5k and writes a summary to results.txt.
 
 Usage (from RAE/ root):
-    python eval_pix_ts_sweep_1152_ep30.py
+    python eval_pix_ts_sweep_1152.py             # default epoch
+    EP=0000080 python eval_pix_ts_sweep_1152.py  # any checkpoint
 
 Outputs per pixel_time_shift value:
     PNG dir : {SAMPLE_ROOT}/pix_ts{value:.2f}/
@@ -41,7 +42,7 @@ SOURCE_EXPERIMENT = (
     "PixDDT_project_free_layer_1_3_5_7_false_wo_lora_w_y_embed_adaln_zero_"
     "12_1152_DiTDHXL_null_s_clean"
 )
-EP = "0000030"
+EP = os.environ.get("EP", "0000050")   # override per checkpoint: EP=0000080 python ...
 CKPT = (
     f"/home/shihaoyang/data/ckpts/PixDDTv2/{SOURCE_EXPERIMENT}"
     f"/checkpoints/ep-{EP}.pt"
