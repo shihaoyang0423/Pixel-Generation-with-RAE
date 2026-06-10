@@ -29,6 +29,7 @@ Usage (from RAE/ root):
 """
 
 import argparse
+import copy
 import math
 import os
 import sys
@@ -125,6 +126,48 @@ def build_label_sampler(
     raise ValueError(f"Unknown label sampling mode: {sampling_mode!r}")
 
 
+def select_state_dict(ckpt_data: object) -> dict:
+    if isinstance(ckpt_data, dict):
+        if "ema" in ckpt_data:
+            return ckpt_data["ema"]
+        if "model" in ckpt_data:
+            return ckpt_data["model"]
+    return ckpt_data
+
+
+def load_model_weights(model: torch.nn.Module, ckpt_path: str, *, rank: int, label: str) -> None:
+    ckpt_data = torch.load(ckpt_path, map_location="cpu")
+    state_dict = select_state_dict(ckpt_data)
+    if rank == 0:
+        key = "ema" if isinstance(ckpt_data, dict) and "ema" in ckpt_data else (
+            "model" if isinstance(ckpt_data, dict) and "model" in ckpt_data else "raw"
+        )
+        print(f"Loading {label} weights ({key}) from {ckpt_path}")
+    model.load_state_dict(state_dict, strict=True)
+
+
+def build_guidance_model_config(guidance_d: dict, model_config):
+    guidance_model_cfg = guidance_d.get("guidance_model")
+    if guidance_model_cfg is None:
+        raise ValueError("guidance.guidance_model is required for AutoGuidance.")
+
+    base_cfg = OmegaConf.to_container(model_config, resolve=True)
+    guidance_model_cfg = copy.deepcopy(guidance_model_cfg)
+
+    # Allow a compact config:
+    # guidance_model:
+    #   ckpt: /path/to/bad.pt
+    # It inherits target/params from stage_2 so same-architecture bad checkpoints
+    # do not need a huge duplicated YAML block.
+    if "target" not in guidance_model_cfg:
+        ckpt = guidance_model_cfg.get("ckpt")
+        guidance_model_cfg = copy.deepcopy(base_cfg)
+        if ckpt is not None:
+            guidance_model_cfg["ckpt"] = ckpt
+
+    return guidance_model_cfg
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -201,20 +244,7 @@ def main(args: argparse.Namespace) -> None:
     model: Stage2ModelProtocol = instantiate_from_config(model_config).to(device)
 
     if args.ckpt is not None:
-        ckpt_data = torch.load(args.ckpt, map_location="cpu")
-        if "ema" in ckpt_data:
-            state_dict = ckpt_data["ema"]
-            if rank == 0:
-                print(f"Loading EMA weights from {args.ckpt}")
-        elif "model" in ckpt_data:
-            state_dict = ckpt_data["model"]
-            if rank == 0:
-                print(f"Loading model weights from {args.ckpt}")
-        else:
-            state_dict = ckpt_data
-            if rank == 0:
-                print(f"Loading raw state dict from {args.ckpt}")
-        model.load_state_dict(state_dict, strict=True)
+        load_model_weights(model, args.ckpt, rank=rank, label="good model")
     else:
         if rank == 0:
             print("WARNING: --ckpt not provided; using randomly initialised PixelDDT weights.")
@@ -237,9 +267,12 @@ def main(args: argparse.Namespace) -> None:
     num_steps = args.num_steps if args.num_steps is not None else sampler_params.get("num_steps", 50)
 
     # ---- Guidance settings ----
+    guidance_method = str(guidance_d.get("method", "cfg")).lower()
     guidance_scale = float(guidance_d.get("scale", 1.0))
     if args.cfg_scale is not None:
         guidance_scale = float(args.cfg_scale)
+    if args.guidance_method is not None:
+        guidance_method = args.guidance_method.lower()
 
     def _gval(key: str, default: float) -> float:
         if key in guidance_d:
@@ -252,7 +285,26 @@ def main(args: argparse.Namespace) -> None:
     t_max = _gval("t_max", 1.0)
     if args.t_max is not None:
         t_max = float(args.t_max)
-    using_cfg = guidance_scale > 1.0
+    using_guidance = guidance_scale > 1.0
+    using_cfg = using_guidance and guidance_method == "cfg"
+    using_ag = using_guidance and guidance_method == "autoguidance"
+    if using_guidance and guidance_method not in {"cfg", "autoguidance"}:
+        raise ValueError(f"Unknown guidance method: {guidance_method!r}")
+
+    guidance_model = None
+    ag_phase = str(guidance_d.get("ag_phase", "pixel")).lower()
+    if args.ag_phase is not None:
+        ag_phase = args.ag_phase.lower()
+    if using_ag:
+        guidance_model_cfg = build_guidance_model_config(guidance_d, model_config)
+        ag_ckpt = args.ag_ckpt or guidance_model_cfg.get("ckpt")
+        guidance_model_cfg = copy.deepcopy(guidance_model_cfg)
+        guidance_model_cfg.pop("ckpt", None)
+        guidance_model: Stage2ModelProtocol = instantiate_from_config(guidance_model_cfg).to(device)
+        if ag_ckpt is None:
+            raise ValueError("AutoGuidance needs a bad-model checkpoint via guidance_model.ckpt or --ag-ckpt.")
+        load_model_weights(guidance_model, ag_ckpt, rank=rank, label="AutoGuidance bad model")
+        guidance_model.eval()
 
     # ---- Output folder ----
     ckpt_name = (
@@ -261,7 +313,7 @@ def main(args: argparse.Namespace) -> None:
     )
     folder_name = os.environ.get(
         "SAVE_FOLDER",
-        f"PixelDDT-project-{ckpt_name}-cfg{guidance_scale:.2f}"
+        f"PixelDDT-project-{ckpt_name}-{guidance_method}{guidance_scale:.2f}"
         f"-bs{args.per_proc_batch_size}-euler{num_steps}-{args.precision}",
     )
     sample_folder_dir = os.path.join(args.sample_dir, folder_name)
@@ -331,6 +383,9 @@ def main(args: argparse.Namespace) -> None:
                 num_steps=num_steps,
                 cfg_scale=guidance_scale,
                 cfg_interval=(t_min, t_max),
+                guidance_method=guidance_method,
+                guidance_model=guidance_model,
+                ag_phase=ag_phase,
                 verbose=False,
                 y=sample_y,
             )
@@ -387,9 +442,15 @@ if __name__ == "__main__":
     parser.add_argument("--precision", type=str, choices=["fp32", "bf16"], default="fp32")
     parser.add_argument("--label-sampling", type=str, choices=["random", "equal"], default="equal")
     parser.add_argument("--cfg-scale", type=float, default=None,
-                        help="Override CFG guidance scale from config.")
+                        help="Override guidance scale from config.")
     parser.add_argument("--t-min", type=float, default=None)
     parser.add_argument("--t-max", type=float, default=None)
+    parser.add_argument("--guidance-method", type=str, choices=["cfg", "autoguidance"], default=None,
+                        help="Override guidance.method from config.")
+    parser.add_argument("--ag-ckpt", type=str, default=None,
+                        help="Override guidance.guidance_model.ckpt for AutoGuidance bad model.")
+    parser.add_argument("--ag-phase", type=str, choices=["pixel", "rae", "both"], default=None,
+                        help="Which phase to apply AutoGuidance to. Default comes from config.")
     parser.add_argument("--naive", action="store_true",
                         help="Ignored (project version always uses Euler; kept for CLI compat).")
 

@@ -182,6 +182,9 @@ def project_sample_ode_naive(
     num_steps=50,
     cfg_scale=1.0,
     cfg_interval=(0.0, 1.0),
+    guidance_method="cfg",
+    guidance_model=None,
+    ag_phase="pixel",
     verbose=False,
     **kwargs
 ):
@@ -195,13 +198,42 @@ def project_sample_ode_naive(
     model: PixelDDT instance (PixelDDTv2_project.PixelDDT) — passed directly.
     kwargs: must contain at least 'y' (class labels tensor).
 
-    cfg_scale > 1.0: z_pix/z_rae must already be doubled [cond; uncond],
-                     y must be doubled [y_cond; y_null].
+    guidance_method == "cfg" and cfg_scale > 1.0:
+        z_pix/z_rae must already be doubled [cond; uncond],
+        y must be doubled [y_cond; y_null].
+
+    guidance_method == "autoguidance" and cfg_scale > 1.0:
+        z_pix/z_rae/y stay at normal batch size. guidance_model supplies
+        the bad-model prediction, mixed as bad + scale * (good - bad).
     """
     B_full = z_pix.shape[0]   # may be 2B if CFG
     device = z_pix.device
-    using_cfg = cfg_scale > 1.0
+    guidance_method = (guidance_method or "cfg").lower()
+    using_guidance = cfg_scale > 1.0
+    using_cfg = using_guidance and guidance_method == "cfg"
+    using_ag = using_guidance and guidance_method == "autoguidance"
+    ag_phase = (ag_phase or "pixel").lower()
+    if using_guidance and guidance_method not in {"cfg", "autoguidance"}:
+        raise ValueError(f"Unknown guidance_method: {guidance_method!r}")
+    if using_ag and guidance_model is None:
+        raise ValueError("guidance_model is required when guidance_method='autoguidance'.")
+    if using_ag and ag_phase not in {"pixel", "rae", "both"}:
+        raise ValueError(f"Unknown ag_phase: {ag_phase!r}; expected pixel/rae/both.")
     y = kwargs['y']
+
+    def apply_autoguidance(good_out, bad_out, t_batch, channels):
+        good_eps = good_out[:, :channels]
+        bad_eps = bad_out[:, :channels]
+        rest = good_out[:, channels:]
+        guid_t_min, guid_t_max = cfg_interval
+        mask = ((t_batch >= guid_t_min) & (t_batch <= guid_t_max))
+        mask = mask.view(-1, *([1] * (len(good_eps.shape) - 1)))
+        guided_eps = torch.where(
+            mask,
+            bad_eps + cfg_scale * (good_eps - bad_eps),
+            good_eps,
+        )
+        return torch.cat([guided_eps, rest], dim=1) if rest.shape[1] > 0 else guided_eps
 
     def get_t(s, shift):
         return shift * s / (1 + (shift - 1) * s)
@@ -227,6 +259,10 @@ def project_sample_ode_naive(
                     x_pix, t_pix_batch, y, None,
                     cfg_scale=cfg_scale, cfg_interval=cfg_interval
                 )
+            elif using_ag and ag_phase in {"pixel", "both"}:
+                good_pix = model.forward_pix(x_pix, t_pix_batch, y, None)
+                bad_pix = guidance_model.forward_pix(x_pix, t_pix_batch, y, None)
+                model_out_pix = apply_autoguidance(good_pix, bad_pix, t_pix_batch, model.in_channels)
             else:
                 model_out_pix = model.forward_pix(x_pix, t_pix_batch, y, None)
             drift_pix_dt = compute_ode_drift(transport_pix, x_pix, t_pix_batch, model_out_pix)
@@ -256,6 +292,10 @@ def project_sample_ode_naive(
             model_out_rae = model.forward_rae_with_cfg(
                 x_rae, t_rae_batch, y, cfg_scale=cfg_scale, cfg_interval=cfg_interval
             )
+        elif using_ag and ag_phase in {"rae", "both"}:
+            good_rae = model.forward_rae(x_rae, t_rae_batch, y)
+            bad_rae = guidance_model.forward_rae(x_rae, t_rae_batch, y)
+            model_out_rae = apply_autoguidance(good_rae, bad_rae, t_rae_batch, model.ddt.in_channels)
         else:
             model_out_rae = model.forward_rae(x_rae, t_rae_batch, y)
 
@@ -306,6 +346,10 @@ def project_sample_ode_naive(
                 x_pix, t_pix_batch, y, s_clean,
                 cfg_scale=cfg_scale, cfg_interval=cfg_interval
             )
+        elif using_ag and ag_phase in {"pixel", "both"}:
+            good_pix = model.forward_pix(x_pix, t_pix_batch, y, s_clean)
+            bad_pix = guidance_model.forward_pix(x_pix, t_pix_batch, y, s_clean)
+            model_out_pix = apply_autoguidance(good_pix, bad_pix, t_pix_batch, model.in_channels)
         else:
             model_out_pix = model.forward_pix(x_pix, t_pix_batch, y, s_clean)
 

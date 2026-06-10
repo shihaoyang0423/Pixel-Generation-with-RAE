@@ -124,9 +124,88 @@ model.forward_pix_with_cfg(...)
 
 ## 实验设计
 
-### 第一版：Pixel Phase 3 AutoGuidance
+### 路线 A：不重新训练（优先第一版）
 
-第一版只改采样，不重新训练 good model。
+第一版优先走“不重新训练”路线：good model 用当前最好/最终 PixelDDT checkpoint，bad model 用同架构但较早、较弱的 checkpoint。当前实验决定用 `ep20` checkpoint 作为 bad model；原先考虑过 `ep10`，但如果 `ep10.pt` 已删除，就不再依赖它。
+
+```text
+good model = 当前最终/最好 checkpoint，例如 ep50 或 FID 最好的 ckpt
+bad model  = ep20 checkpoint，同架构、同配置、同输出接口
+```
+
+这条路线只改 sampling，不改 training loss，也不需要重新跑训练。要做的事情：
+
+1. 在采样 YAML 里把 `guidance.method` 改成 `autoguidance`。
+2. 在 `guidance.guidance_model.ckpt` 里填 `ep20` checkpoint 路径。
+3. 采样脚本加载 good model 和 bad model。
+4. 每个 Pixel ODE step 同时跑：
+
+```python
+good_pix = good_model.forward_pix(x_pix, t_pix, y, s_clean)
+bad_pix = bad_model.forward_pix(x_pix, t_pix, y, s_clean)
+guided = bad_pix + scale * (good_pix - bad_pix)
+```
+
+5. 做小 scale sweep，先看图，再跑 FID。
+
+`ep20` 作为 bad model 的判断：
+
+| 条件 | ep20 是否适合 |
+|---|---|
+| 与 good checkpoint 来自同一次训练 | 很适合，结构完全对齐 |
+| Pixel Head 已经学到基本图像结构 | 适合，bad 但不是纯噪声 |
+| ep20 太早，输出很差 | 可先用低 scale，例如 1.02 / 1.05 / 1.1 |
+| ep20 与 good 差异太小 | AG 方向会弱，需要换更早/更小模型 |
+
+推荐先跑：
+
+```text
+AG scale = 1.00, 1.02, 1.05, 1.10, 1.20
+bad ckpt = ep20
+good ckpt = final/best
+ag_phase = pixel
+```
+
+其中 `scale=1.00` 是同一 AG 代码路径下的 good-only 对照，因为 `bad + 1.00 * (good - bad) = good`。
+
+这条路线的意义是快速回答：“当前 PixelDDT 是否能从 AutoGuidance 的 bad-model 方向受益？” 如果 ep20 结果已经有改善，就再考虑更系统地训练 weak bad model；如果完全没收益，也能避免盲目重训。
+
+### 路线 B：重新训练一个 bad model（第二阶段）
+
+如果 `ep20` 太差、太接近 good，或者没有合适中间 checkpoint，就需要专门训练一个 bad model。注意这里通常不是重训 good model，而是训练一个用于 AutoGuidance 的 weak/bad model。
+
+bad model 训练目标不是追求最强 FID，而是产生一个“会生成、但质量低于 good”的模型。它要满足接口兼容：
+
+- `target` 最好仍是 `stage2.models.PixelDDTv2_project_free_layer.PixelDDT`。
+- Pixel output shape 与 good 一致。
+- `prediction`、数据范围、`rae_inject_layers`、`use_y_embedder` 等配置与 good 对齐，除非明确做“小模型 bad”实验。
+- 采样时能调用同样的 `forward_pix(x_pix, t_pix, y, s_clean)`。
+
+可选训练方式：
+
+| 方式 | 做法 | 优点 | 风险 |
+|---|---|---|---|
+| 少训练步 bad | 用同架构训练 5/10/20 epoch 后停止 | 最贴近 “bad version of itself” | 需要额外训练时间 |
+| 小模型 bad | 降低 Pixel Head depth/hidden size | 与 AG 论文 smaller bad model 对齐 | 架构不同，配置和 ckpt 管理更复杂 |
+| 欠拟合 bad | 同架构但减少训练预算或数据 | 容易制造质量差距 | 太差会给出错误方向 |
+| 早停多 ckpt | 训练时保留多个中间 ckpt | 一次训练得到多个 bad 候选 | 需要存储和系统 sweep |
+
+重新训练 bad model 的建议顺序：
+
+1. 复用 good model 的 training YAML，先保持同架构。
+2. 训练到较早 epoch，例如 `ep5/ep10/ep20`，每个都保存 EMA。
+3. 不需要让 bad model 达到 good 的 FID；只要它能生成同分布的粗图像即可。
+4. 用同一个 good checkpoint，对多个 bad checkpoint 做 AG sweep。
+5. 如果同架构早停 bad 有收益，再考虑小模型 bad。
+
+不建议第一步就重新训练 good model，原因：
+
+- AutoGuidance 是 sampling-time 方法，核心逻辑不改变 good model 的训练 loss。
+- 现有 final/best checkpoint 已经可以作为 good model。
+- 先用 `ep20` 做 bad model 可以快速验证方向，成本极低。
+- 重训会把“AG 是否有效”和“新模型是否训好”混在一起，排查更慢。
+
+### 第一版：Pixel Phase 3 AutoGuidance
 
 ```text
 Phase 1: RAE ODE
