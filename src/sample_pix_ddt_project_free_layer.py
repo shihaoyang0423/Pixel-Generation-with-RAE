@@ -135,9 +135,26 @@ def select_state_dict(ckpt_data: object) -> dict:
     return ckpt_data
 
 
+def add_legacy_free_layer_keys(state_dict: dict, model: torch.nn.Module) -> dict:
+    """Map single-stage free_layer checkpoints to the current ModuleList names."""
+    model_keys = model.state_dict().keys()
+    mapped = dict(state_dict)
+    legacy_pairs = {
+        "s_projector.weight": "s_projectors.0.weight",
+        "s_projector.bias": "s_projectors.0.bias",
+        "feat_rope.freqs_cos": "feat_rope_list.0.freqs_cos",
+        "feat_rope.freqs_sin": "feat_rope_list.0.freqs_sin",
+    }
+    for old_key, new_key in legacy_pairs.items():
+        if new_key in model_keys and new_key not in mapped and old_key in mapped:
+            mapped[new_key] = mapped[old_key]
+    return mapped
+
+
 def load_model_weights(model: torch.nn.Module, ckpt_path: str, *, rank: int, label: str) -> None:
     ckpt_data = torch.load(ckpt_path, map_location="cpu")
     state_dict = select_state_dict(ckpt_data)
+    state_dict = add_legacy_free_layer_keys(state_dict, model)
     if rank == 0:
         key = "ema" if isinstance(ckpt_data, dict) and "ema" in ckpt_data else (
             "model" if isinstance(ckpt_data, dict) and "model" in ckpt_data else "raw"
