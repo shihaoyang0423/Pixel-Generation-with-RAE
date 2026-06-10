@@ -49,7 +49,7 @@ def _env_float_or_none(name, default):
 _pix_ts_env = os.environ.get("PIX_TS")
 PIXEL_TIME_SHIFTS = (
     [float(x) for x in _pix_ts_env.split(",") if x.strip()]
-    if _pix_ts_env else [1.0, 2.0, 3.0, 4.0, 6.0]
+    if _pix_ts_env else [3.0, 3.5, 4.0, 4.5, 5.0]
 )
 
 SOURCE_EXPERIMENT = (

@@ -154,9 +154,12 @@ else
     run_combo null 1.0 0.0 1.0
 
     # (1) null-mode CFG-scale sweep (null = the mode this model was trained for).
+    # run_combo null 1.5 0.0 1.0
+    # run_combo null 2.0 0.0 1.0
+    # run_combo null 2.5 0.0 1.0
+    run_combo null 1.4 0.0 1.0
     run_combo null 1.5 0.0 1.0
-    run_combo null 2.0 0.0 1.0
-    run_combo null 2.5 0.0 1.0
+    run_combo null 1.6 0.0 1.0
 
     # (2) 4-mode s_clean compare — DISABLED: prior experiments found shared/split/traj
     #     add little over plain null. Re-enable by uncommenting if you want the ablation back.
