@@ -269,10 +269,9 @@ configs/stage2/sampling/ImageNet256/PixDDT_12x1152_project_free_layer_1_3_5_7_Di
 /home/shihaoyang/data/pretrained/DiTs/Dinov2/wReg_base/ImageNet256/DiTDH-XL/stage2_model.pt
 ```
 
-默认 bad guidance model 使用同架构 weaker checkpoints：
+默认 bad guidance model 使用同架构 weaker checkpoint：
 
 ```text
-/home/shihaoyang/data/pretrained/DiTs/Dinov2/wReg_base/ImageNet256/DiTDH-XL_ep20/stage2_model.pt
 /home/shihaoyang/data/pretrained/DiTs/Dinov2/wReg_base/ImageNet256/DiTDH-XL_ep80/stage2_model.pt
 ```
 
@@ -311,4 +310,5 @@ PIXEL_CKPT="/path/to/12x1152/checkpoints/ep-0000050.pt" bash ag_sweep_1152.sh
 - `python3 -m py_compile src/sample_pix_ddt_project_free_layer.py src/train_stage3_projcet_free_layer.py`
 - `bash -n ag_sweep.sh`
 - 如需重复 control，可手动设置 `SCALES="1.00"` 单跑。
-- `bad=DiTDH-S_ep14` 用于主要 AG sweep。
+- 6*768 主要 AG sweep 使用 `bad=DiTDH-S_ep14`。
+- 12*1152 主要 AG sweep 使用 `bad=DiTDH-XL_ep80`。

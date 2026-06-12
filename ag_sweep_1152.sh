@@ -3,7 +3,7 @@
 #
 # Good PixelDDT: 12x1152 Pixel Head checkpoint passed via --ckpt.
 # Good DiTDH  : DiTDH-XL, matching the original 12x1152 config.
-# Bad DiTDH   : weaker DiTDH-XL checkpoints by default (ep20, ep80).
+# Bad DiTDH   : DiTDH-XL_ep80 by default.
 # Pixel time shift defaults to pix_ts=1 via the dedicated AG YAML.
 
 set -euo pipefail
@@ -19,7 +19,6 @@ REF="${REF:-/home/shihaoyang/data/data/VIRTUAL_imagenet256_labeled.npz}"
 
 GOOD_DITDH_CKPT="${PRETRAIN_DIR}/DiTDH-XL/stage2_model.pt"
 BAD_DITDH_CKPTS=(
-    "bad_DiTDH-XL_ep20:${PRETRAIN_DIR}/DiTDH-XL_ep20/stage2_model.pt"
     "bad_DiTDH-XL_ep80:${PRETRAIN_DIR}/DiTDH-XL_ep80/stage2_model.pt"
 )
 

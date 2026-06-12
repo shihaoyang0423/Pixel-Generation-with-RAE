@@ -91,8 +91,8 @@ guidance:
   ag_phase: 'condition'
   guidance_model:
     # Compact form: bad DiTDH inherits the DiTDH-XL stage2_config above.
-    # ag_sweep_1152.sh overrides ckpt with DiTDH-XL_ep20 / DiTDH-XL_ep80.
-    ckpt: '/home/shihaoyang/data/pretrained/DiTs/Dinov2/wReg_base/ImageNet256/DiTDH-XL_ep20/stage2_model.pt'
+    # ag_sweep_1152.sh also passes this path via --ag-ckpt.
+    ckpt: '/home/shihaoyang/data/pretrained/DiTs/Dinov2/wReg_base/ImageNet256/DiTDH-XL_ep80/stage2_model.pt'
 
 misc:
   latent_size: [3, 256, 256]
