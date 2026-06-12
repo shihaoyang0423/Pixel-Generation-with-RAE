@@ -34,7 +34,7 @@ import yaml  # PyYAML (already available in the rae env)
 
 # List of pixel_time_shift values to test for the 6x768 AG run.
 # pix_ts = sqrt(misc.time_dist_shift_dim / misc.time_dist_shift_base).
-PIXEL_TIME_SHIFTS = [0.75, 1.0, 1.25, 1.5, 2.0, 3.0]  # <-- modify here
+PIXEL_TIME_SHIFTS = [0.25, 0.50, 0.75, 1.0]  # <-- modify here
 
 CKPT = (
     "/home/shihaoyang/data/ckpts/PixDDTv2/"
