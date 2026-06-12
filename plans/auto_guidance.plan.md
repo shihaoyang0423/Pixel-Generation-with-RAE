@@ -210,12 +210,11 @@ CLI override 优先级：
 | --- | --- |
 | good DiTDH | `DiTDH-S_ep20/stage2_model.pt`，由 `stage_2.params.stage2_ckpt` 加载 |
 | bad DiTDH | `DiTDH-S_ep14/stage2_model.pt`，作为 AG guidance model |
-| same-as-good control | `DiTDH-S_ep20/stage2_model.pt`，只用于 sanity check |
 
 Scale：
 
 ```text
-1.00, 1.02, 1.05, 1.10, 1.20
+1.25, 1.30, 1.40, 1.50, 1.75, 2.00
 ```
 
 首轮 interval：
@@ -224,7 +223,7 @@ Scale：
 t_min=0.0, t_max=1.0
 ```
 
-`same-as-good control=ep20` 不是 bad model；它只用于确认当 guidance model 和 good DiTDH 权重相同时，AG 方向应接近零。`scale=1.00` 是 good-only control。
+上一轮 `1.00, 1.02, 1.05, 1.10, 1.20` 中，ep14 bad 随 scale 增大持续改善；下一轮只保留 `ep14 as bad + ep20 as good`，继续探索更大的 scale。
 
 ## 实现约束
 
@@ -238,6 +237,5 @@ t_min=0.0, t_max=1.0
 
 - `python3 -m py_compile src/sample_pix_ddt_project_free_layer.py src/train_stage3_projcet_free_layer.py`
 - `bash -n ag_sweep.sh`
-- `scale=1.00` 输出作为 good-only control。
-- `same-as-good control=DiTDH-S_ep20` 相对 good DiTDH 应接近无 AG 方向。
+- 如需重复 control，可手动设置 `SCALES="1.00"` 单跑。
 - `bad=DiTDH-S_ep14` 用于主要 AG sweep。

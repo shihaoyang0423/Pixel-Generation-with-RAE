@@ -4,7 +4,6 @@
 # Good PixelDDT: trained Pixel Head checkpoint passed via --ckpt.
 # Good DiTDH  : stage_2.params.stage2_ckpt in the YAML, default ep20.
 # Bad DiTDH   : --ag-ckpt, DiTDH-S ep14.
-# Control     : DiTDH-S ep20 as same-as-good sanity check.
 #
 # AutoGuidance is applied only while generating the RAE/DiTDH condition:
 #   D_w(x, t, y) = bad(x, t, y) + w * (good(x, t, y) - bad(x, t, y))
@@ -25,9 +24,7 @@ GOOD_DITDH_CKPT="${PRETRAIN_DIR}/DiTDH-S_ep20/stage2_model.pt"
 BAD_DITDH_CKPTS=(
     "bad_ep14:${PRETRAIN_DIR}/DiTDH-S_ep14/stage2_model.pt"
 )
-CONTROL_DITDH_CKPTS=(
-    "same_as_good_ep20:${GOOD_DITDH_CKPT}"
-)
+SCALES=(${SCALES:-1.00 1.25 1.30 1.40 1.50 1.75 2.00})
 
 NPROC="${NPROC:-8}"
 BATCH_SIZE="${BATCH_SIZE:-64}"
@@ -115,14 +112,12 @@ run_combo() {
     printf "%-18s  %-16s  %-8s  %-8s  %-8s  %s\n" "${role}" "${bad_name}" "${scale}" "${t_min}" "${t_max}" "${fid_val}" >> "${RESULTS_FILE}"
 }
 
-for item in "${BAD_DITDH_CKPTS[@]}" "${CONTROL_DITDH_CKPTS[@]}"; do
+for item in "${BAD_DITDH_CKPTS[@]}"; do
     role="${item%%:*}"
     ckpt="${item#*:}"
-    run_combo "${role}" "${ckpt}" 1.00 0.0 1.0
-    run_combo "${role}" "${ckpt}" 1.02 0.0 1.0
-    run_combo "${role}" "${ckpt}" 1.05 0.0 1.0
-    run_combo "${role}" "${ckpt}" 1.10 0.0 1.0
-    run_combo "${role}" "${ckpt}" 1.20 0.0 1.0
+    for scale in "${SCALES[@]}"; do
+        run_combo "${role}" "${ckpt}" "${scale}" 0.0 1.0
+    done
 done
 
 echo ""
