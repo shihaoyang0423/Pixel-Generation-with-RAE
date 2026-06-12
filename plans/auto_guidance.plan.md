@@ -214,16 +214,64 @@ CLI override 优先级：
 Scale：
 
 ```text
-1.25, 1.30, 1.40, 1.50, 1.75, 2.00
+2.50, 3.00, 3.50, 4.00
 ```
 
-首轮 interval：
+Interval：
 
 ```text
 t_min=0.0, t_max=1.0
 ```
 
-上一轮 `1.00, 1.02, 1.05, 1.10, 1.20` 中，ep14 bad 随 scale 增大持续改善；下一轮只保留 `ep14 as bad + ep20 as good`，继续探索更大的 scale。
+上一轮 `scale=1.00, 2.00, 3.00, 4.00, 5.00` 中，`scale=3.00` 最好，`4.00` 略回升，`5.00` 明显过强。当前 `ag_sweep.sh` 只保留 `ep14 as bad + ep20 as good` 的 AG scale sweep。
+
+运行 6*768 AG scale sweep：
+
+```bash
+cd /home/shihaoyang/RAE
+bash ag_sweep.sh
+```
+
+临时改 sweep 网格：
+
+```bash
+SCALES="2.50 3.00 3.50" bash ag_sweep.sh
+```
+
+## Pix TS Sweep
+
+Pixel time shift 不放进 `ag_sweep.sh`。如果要在某个 AG scale 的基础上扫 `pix_ts`，使用专门的 `eval_pix_ts_sweep.py`，通过生成临时 YAML 修改：
+
+```text
+misc.time_dist_shift_dim = int(pix_ts ** 2 * misc.time_dist_shift_base)
+```
+
+推荐流程：
+
+```text
+1. 用 ag_sweep.sh 先确定较好的 AG scale。
+2. 在 eval_pix_ts_sweep.py 中固定该 AG scale、AG config 和 bad DiTDH checkpoint。
+3. 只让 eval_pix_ts_sweep.py 管理 pix_ts 列表和临时 YAML。
+```
+
+## 12*1152 后续实验
+
+12*1152 不和 6*768 共用 `ag_sweep.sh`。需要时单独建 12*1152 的 sampling config 和 sweep 脚本，保持：
+
+```text
+good DiTDH = DiTDH-XL
+bad DiTDH  = DiTDH-S_ep14 或另一个明确指定的 weak DiTDH
+```
+
+12*1152 的 good DiTDH 路径：
+
+```text
+/home/shihaoyang/data/pretrained/DiTs/Dinov2/wReg_base/ImageNet256/DiTDH-XL/stage2_model.pt
+```
+
+如果 bad 用 DiTDH-S，则 `guidance_model` 必须显式写 DiTDH-S architecture，不能使用 compact 继承写法，因为 compact 写法会继承 good DiTDH-XL 的 `stage2_config`。
+
+不要把 12*1152 的 `EXP_NAME`、`CONFIG`、`PIXEL_CKPT` 塞进 6*768 的 `ag_sweep.sh` 环境变量里复用。
 
 ## 实现约束
 

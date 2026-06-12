@@ -21,10 +21,11 @@ SAMPLE_BASE="${SAMPLE_BASE:-/home/shihaoyang/data/samples/${EXP_NAME}_autoguidan
 REF="${REF:-/home/shihaoyang/data/data/VIRTUAL_imagenet256_labeled.npz}"
 
 GOOD_DITDH_CKPT="${PRETRAIN_DIR}/DiTDH-S_ep20/stage2_model.pt"
+BAD_DITDH_CKPT="${PRETRAIN_DIR}/DiTDH-S_ep14/stage2_model.pt"
 BAD_DITDH_CKPTS=(
-    "bad_ep14:${PRETRAIN_DIR}/DiTDH-S_ep14/stage2_model.pt"
+    "bad_$(basename "$(dirname "${BAD_DITDH_CKPT}")"):${BAD_DITDH_CKPT}"
 )
-SCALES=(${SCALES:-1.00 1.25 1.30 1.40 1.50 1.75 2.00})
+SCALES=(${SCALES:-2.50 3.00 3.50 4.00})
 
 NPROC="${NPROC:-8}"
 BATCH_SIZE="${BATCH_SIZE:-64}"
@@ -50,7 +51,6 @@ fi
     echo "pixel_ckpt=${PIXEL_CKPT}"
     echo "config=${CONFIG}"
     echo "pretrain_dir=${PRETRAIN_DIR}"
-    echo "pix_ts=1.0 (time_dist_shift_dim=4096, base=4096)"
     echo "good_ditdh=${GOOD_DITDH_CKPT}"
     printf "%-18s  %-16s  %-8s  %-8s  %-8s  %s\n" "role" "guidance_ditdh" "scale" "t_min" "t_max" "FID5k"
     echo "-------------------------------------------------------"

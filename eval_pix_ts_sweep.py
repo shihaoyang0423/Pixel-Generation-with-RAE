@@ -11,9 +11,9 @@ Usage (from RAE/ root):
     python eval_pix_ts_sweep.py
 
 Outputs per pixel_time_shift value:
-    PNG dir : {SAMPLE_ROOT}/pix_ts{value:.2f}/
-    NPZ file: {SAMPLE_ROOT}/pix_ts{value:.2f}.npz
-    log     : {SAMPLE_ROOT}/pix_ts{value:.2f}.log
+    PNG dir : {SAMPLE_ROOT}/ag-s{scale:.2f}-pix_ts{value:.2f}/
+    NPZ file: {SAMPLE_ROOT}/ag-s{scale:.2f}-pix_ts{value:.2f}.npz
+    log     : {SAMPLE_ROOT}/ag-s{scale:.2f}-pix_ts{value:.2f}.log
 Summary   : {EXPERIMENT_ROOT}/results.txt  (parent of SAMPLE_ROOT)
 """
 
@@ -32,28 +32,42 @@ import yaml  # PyYAML (already available in the rae env)
 # USER SETTINGS — edit this section to control the sweep
 # =============================================================================
 
-# List of pixel_time_shift values to test.
-# The currently-trained default is 2.0 (dim=16384, base=4096).
-PIXEL_TIME_SHIFTS = [0.2, 0.3, 0.5, 0.8, 1.0, 1.5, 2.0, 2.5, 3.0]  # [0.05, 0.1, 0.15, 0.25, 0.35, 0.4, 0.45]  # [0.2, 0.3, 0.5, 0.8, 1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 6.0, 7.0]  # <-- modify here
+# List of pixel_time_shift values to test for the 6x768 AG run.
+# pix_ts = sqrt(misc.time_dist_shift_dim / misc.time_dist_shift_base).
+PIXEL_TIME_SHIFTS = [0.75, 1.0, 1.25, 1.5, 2.0, 3.0]  # <-- modify here
 
 CKPT = (
     "/home/shihaoyang/data/ckpts/PixDDTv2/"
-    "PixDDT_small_v2_project_free_layer_1_3_5_7_false_wo_lora_w_y_embed_adaln_zero_12_768/checkpoints/ep-0000100.pt"
+    "PixDDT_small_v2_project_free_layer_2_false_logit_normal_0.8_0.8_pix_ts_1_wo_lora_w_y_embed_adaln_zero"
+    "/checkpoints/ep-0000050.pt"
 )
 
 # Base YAML (relative to RAE/ root) — misc.time_dist_shift_dim will be patched per run
 BASE_CONFIG = (
     "configs/stage2/sampling/ImageNet256"
-    "/PixDDT_small_v2_lora_project_free_layer.yaml"
+    "/PixDDT_6x768_project_free_layer_2_false_pix_ts1_AG.yaml"
 )
+
+# Fixed AutoGuidance settings for this pix_ts sweep.
+GUIDANCE_METHOD = "autoguidance"
+AG_PHASE = "condition"
+AG_CKPT = (
+    "/home/shihaoyang/data/pretrained/DiTs/Dinov2/wReg_base/ImageNet256/"
+    "DiTDH-S_ep14/stage2_model.pt"
+)
+AG_SCALE = 3.0
+T_MIN = 0.0
+T_MAX = 1.0
 
 # Experiment root: results.txt is written here
 EXPERIMENT_ROOT = os.path.expanduser(
-    "~/data/samples/PixDDT_small_v2_project_free_layer_1_3_5_7_false_wo_lora_w_y_embed_adaln_zero_12_768"
+    "~/data/samples/"
+    "PixDDT_small_v2_project_free_layer_2_false_logit_normal_0.8_0.8_pix_ts_1_wo_lora_w_y_embed_adaln_zero"
+    "_autoguidance_ditdh_condition"
 )
 
 # Sweep outputs (PNG dirs, NPZ files, logs) go under this subdirectory
-SAMPLE_ROOT = os.path.join(EXPERIMENT_ROOT, "compare_different_pix_ts")
+SAMPLE_ROOT = os.path.join(EXPERIMENT_ROOT, f"pix_ts_sweep_ag_scale_{AG_SCALE:.2f}")
 
 # Reference statistics NPZ for FID computation
 REF_NPZ = os.path.expanduser("~/data/data/VIRTUAL_imagenet256_labeled.npz")
@@ -171,9 +185,23 @@ def sweep():
     experiment_root.mkdir(parents=True, exist_ok=True)
     results_file = experiment_root / "results.txt"
 
+    required_paths = {
+        "CKPT": CKPT,
+        "BASE_CONFIG": BASE_CONFIG,
+        "AG_CKPT": AG_CKPT,
+        "REF_NPZ": REF_NPZ,
+        "PYTHON": PYTHON,
+    }
+    missing = [f"{name}={path}" for name, path in required_paths.items() if not os.path.exists(path)]
+    if missing:
+        raise FileNotFoundError("Missing required path(s):\n  " + "\n  ".join(missing))
+
     print(f"\n{'='*60}")
     print(f"Pixel TS FID5k Sweep")
     print(f"Checkpoint : {CKPT}")
+    print(f"Base config: {BASE_CONFIG}")
+    print(f"AG ckpt    : {AG_CKPT}")
+    print(f"AG scale   : {AG_SCALE}")
     print(f"Values     : {PIXEL_TIME_SHIFTS}")
     print(f"Sample root: {sample_root}")
     print(f"Results    : {results_file}")
@@ -183,7 +211,7 @@ def sweep():
         base_cfg_snapshot = yaml.safe_load(f)
 
     for ts in PIXEL_TIME_SHIFTS:
-        ts_tag = f"pix_ts{ts:.2f}"
+        ts_tag = f"ag-s{AG_SCALE:.2f}-pix_ts{ts:.2f}"
         dim = _ts_to_dim(ts)
         npz_path = str(sample_root / f"{ts_tag}.npz")
         log_path = str(sample_root / f"{ts_tag}.log")
@@ -215,6 +243,12 @@ def sweep():
                     "--precision", PRECISION,
                     "--label-sampling", "equal",
                     "--naive",
+                    "--guidance-method", GUIDANCE_METHOD,
+                    "--ag-phase", AG_PHASE,
+                    "--ag-ckpt", AG_CKPT,
+                    "--cfg-scale", str(AG_SCALE),
+                    "--t-min", str(T_MIN),
+                    "--t-max", str(T_MAX),
                 ]
                 print(f"[sweep] Running sampling...")
                 rc = _run(
