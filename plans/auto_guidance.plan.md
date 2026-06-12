@@ -256,22 +256,47 @@ misc.time_dist_shift_dim = int(pix_ts ** 2 * misc.time_dist_shift_base)
 
 ## 12*1152 后续实验
 
-12*1152 不和 6*768 共用 `ag_sweep.sh`。需要时单独建 12*1152 的 sampling config 和 sweep 脚本，保持：
+12*1152 不和 6*768 共用 `ag_sweep.sh`。当前使用独立入口：
 
 ```text
-good DiTDH = DiTDH-XL
-bad DiTDH  = DiTDH-S_ep14 或另一个明确指定的 weak DiTDH
+ag_sweep_1152.sh
+configs/stage2/sampling/ImageNet256/PixDDT_12x1152_project_free_layer_1_3_5_7_DiTDHXL_pix_ts1_AG.yaml
 ```
 
-12*1152 的 good DiTDH 路径：
+原 12*1152 配置使用 DiTDH-XL 作为 frozen good DiTDH：
 
 ```text
 /home/shihaoyang/data/pretrained/DiTs/Dinov2/wReg_base/ImageNet256/DiTDH-XL/stage2_model.pt
 ```
 
-如果 bad 用 DiTDH-S，则 `guidance_model` 必须显式写 DiTDH-S architecture，不能使用 compact 继承写法，因为 compact 写法会继承 good DiTDH-XL 的 `stage2_config`。
+默认 bad guidance model 使用同架构 weaker checkpoints：
 
-不要把 12*1152 的 `EXP_NAME`、`CONFIG`、`PIXEL_CKPT` 塞进 6*768 的 `ag_sweep.sh` 环境变量里复用。
+```text
+/home/shihaoyang/data/pretrained/DiTs/Dinov2/wReg_base/ImageNet256/DiTDH-XL_ep20/stage2_model.pt
+/home/shihaoyang/data/pretrained/DiTs/Dinov2/wReg_base/ImageNet256/DiTDH-XL_ep80/stage2_model.pt
+```
+
+默认 `pix_ts=1`：
+
+```text
+misc.time_dist_shift_dim=4096
+misc.time_dist_shift_base=4096
+```
+
+运行：
+
+```bash
+cd /home/shihaoyang/RAE
+bash ag_sweep_1152.sh
+```
+
+如果 12*1152 Pixel Head checkpoint 的实际路径不同，用 `PIXEL_CKPT` 覆盖：
+
+```bash
+PIXEL_CKPT="/path/to/12x1152/checkpoints/ep-0000050.pt" bash ag_sweep_1152.sh
+```
+
+如果 bad 改用 DiTDH-S，则不能使用 compact guidance config，必须显式写 DiTDH-S architecture，因为 compact 写法会继承 good DiTDH-XL 的 `stage2_config`。
 
 ## 实现约束
 
