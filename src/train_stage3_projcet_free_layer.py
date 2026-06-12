@@ -184,7 +184,7 @@ def project_sample_ode_naive(
     cfg_interval=(0.0, 1.0),
     guidance_method="cfg",
     guidance_model=None,
-    ag_phase="pixel",
+    ag_phase="condition",
     verbose=False,
     **kwargs
 ):
@@ -203,8 +203,10 @@ def project_sample_ode_naive(
         y must be doubled [y_cond; y_null].
 
     guidance_method == "autoguidance" and cfg_scale > 1.0:
-        z_pix/z_rae/y stay at normal batch size. guidance_model supplies
-        the bad-model prediction, mixed as bad + scale * (good - bad).
+        z_pix/z_rae/y stay at normal batch size. AutoGuidance is applied
+        to the DiTDH/RAE condition generator with unchanged class condition:
+        bad + scale * (good - bad). The Pixel Head then consumes the guided
+        clean RAE condition normally.
     """
     B_full = z_pix.shape[0]   # may be 2B if CFG
     device = z_pix.device
@@ -212,14 +214,22 @@ def project_sample_ode_naive(
     using_guidance = cfg_scale > 1.0
     using_cfg = using_guidance and guidance_method == "cfg"
     using_ag = using_guidance and guidance_method == "autoguidance"
-    ag_phase = (ag_phase or "pixel").lower()
+    ag_phase = (ag_phase or "condition").lower()
     if using_guidance and guidance_method not in {"cfg", "autoguidance"}:
         raise ValueError(f"Unknown guidance_method: {guidance_method!r}")
     if using_ag and guidance_model is None:
         raise ValueError("guidance_model is required when guidance_method='autoguidance'.")
-    if using_ag and ag_phase not in {"pixel", "rae", "both"}:
-        raise ValueError(f"Unknown ag_phase: {ag_phase!r}; expected pixel/rae/both.")
+    if using_ag and ag_phase not in {"condition", "rae"}:
+        raise ValueError(
+            f"Unknown ag_phase: {ag_phase!r}; expected 'condition'/'rae'. "
+            "AutoGuidance belongs on the DiTDH condition path, not the Pixel Head."
+        )
     y = kwargs['y']
+
+    def guidance_forward_rae(x_rae, t_rae, y):
+        if hasattr(guidance_model, "forward_rae"):
+            return guidance_model.forward_rae(x_rae, t_rae, y)
+        return guidance_model(x_rae, t_rae, y)
 
     def apply_autoguidance(good_out, bad_out, t_batch, channels):
         good_eps = good_out[:, :channels]
@@ -244,6 +254,11 @@ def project_sample_ode_naive(
 
     # pixel_only mode: skip Phase 1 (RAE ODE) and Phase 2 (extract_clean_s)
     if getattr(model, 'pixel_only', False):
+        if using_ag:
+            raise ValueError(
+                "AutoGuidance is defined for the DiTDH/RAE condition path, "
+                "but this PixelDDT is pixel_only and has no condition phase."
+            )
         t0_pix, t1_pix = transport_pix.check_interval(transport_pix.train_eps, transport_pix.sample_eps, eval=True)
         ss_pix = 1.0 - torch.linspace(t0_pix, t1_pix, num_steps + 1, device=device)
         x_pix = z_pix.detach().clone()
@@ -259,10 +274,6 @@ def project_sample_ode_naive(
                     x_pix, t_pix_batch, y, None,
                     cfg_scale=cfg_scale, cfg_interval=cfg_interval
                 )
-            elif using_ag and ag_phase in {"pixel", "both"}:
-                good_pix = model.forward_pix(x_pix, t_pix_batch, y, None)
-                bad_pix = guidance_model.forward_pix(x_pix, t_pix_batch, y, None)
-                model_out_pix = apply_autoguidance(good_pix, bad_pix, t_pix_batch, model.in_channels)
             else:
                 model_out_pix = model.forward_pix(x_pix, t_pix_batch, y, None)
             drift_pix_dt = compute_ode_drift(transport_pix, x_pix, t_pix_batch, model_out_pix)
@@ -292,9 +303,9 @@ def project_sample_ode_naive(
             model_out_rae = model.forward_rae_with_cfg(
                 x_rae, t_rae_batch, y, cfg_scale=cfg_scale, cfg_interval=cfg_interval
             )
-        elif using_ag and ag_phase in {"rae", "both"}:
+        elif using_ag:
             good_rae = model.forward_rae(x_rae, t_rae_batch, y)
-            bad_rae = guidance_model.forward_rae(x_rae, t_rae_batch, y)
+            bad_rae = guidance_forward_rae(x_rae, t_rae_batch, y)
             model_out_rae = apply_autoguidance(good_rae, bad_rae, t_rae_batch, model.ddt.in_channels)
         else:
             model_out_rae = model.forward_rae(x_rae, t_rae_batch, y)
@@ -346,10 +357,6 @@ def project_sample_ode_naive(
                 x_pix, t_pix_batch, y, s_clean,
                 cfg_scale=cfg_scale, cfg_interval=cfg_interval
             )
-        elif using_ag and ag_phase in {"pixel", "both"}:
-            good_pix = model.forward_pix(x_pix, t_pix_batch, y, s_clean)
-            bad_pix = guidance_model.forward_pix(x_pix, t_pix_batch, y, s_clean)
-            model_out_pix = apply_autoguidance(good_pix, bad_pix, t_pix_batch, model.in_channels)
         else:
             model_out_pix = model.forward_pix(x_pix, t_pix_batch, y, s_clean)
 
@@ -367,6 +374,55 @@ def project_sample_ode_naive(
 # -----------------------------------------------------------------------------
 
 from eval import evaluate_generation_distributed
+
+def _select_state_dict(ckpt_data):
+    if isinstance(ckpt_data, dict):
+        if "ema" in ckpt_data:
+            return ckpt_data["ema"]
+        if "model" in ckpt_data:
+            return ckpt_data["model"]
+    return ckpt_data
+
+
+def _strip_module_prefix(state_dict):
+    return {
+        (k[7:] if k.startswith("module.") else k): v
+        for k, v in state_dict.items()
+    }
+
+
+def build_guidance_ddt_config(guidance_cfg, model_config):
+    guidance_model_cfg = guidance_cfg.get("guidance_model")
+    if guidance_model_cfg is None:
+        raise ValueError("guidance_model config required for autoguidance.")
+
+    guidance_model_cfg = deepcopy(guidance_model_cfg)
+    if "target" in guidance_model_cfg:
+        return guidance_model_cfg
+
+    base_cfg = OmegaConf.to_container(model_config, resolve=True)
+    stage2_params = deepcopy(base_cfg.get("params", {}).get("stage2_config"))
+    if stage2_params is None:
+        raise ValueError(
+            "Compact AutoGuidance config requires stage_2.params.stage2_config "
+            "so the bad DiTDH model can be built."
+        )
+
+    cfg = {
+        "target": "stage2.models.DDT.DiTwDDTHead",
+        "params": stage2_params,
+    }
+    ckpt = guidance_model_cfg.get("ckpt")
+    if ckpt is not None:
+        cfg["ckpt"] = ckpt
+    return cfg
+
+
+def load_guidance_ddt_weights(model, ckpt_path):
+    ckpt_data = torch.load(ckpt_path, map_location="cpu")
+    state_dict = _strip_module_prefix(_select_state_dict(ckpt_data))
+    model.load_state_dict(state_dict, strict=True)
+
 
 def save_checkpoint(path_str, step, epoch, model, ema_model, optimizer, scheduler):
     state = {
@@ -631,14 +687,18 @@ def main():
         raise NotImplementedError(f"Invalid sampling mode {sampler_mode_rae}.")
 
     ### Guidance Init
-    guid_model_forward = None
+    guid_model = None
+    ag_phase = str(guidance_cfg.get("ag_phase", "condition")).lower()
     if guidance_scale > 1.0 and guidance_method == "autoguidance":
-        guidance_model_cfg = guidance_cfg.get("guidance_model")
-        if guidance_model_cfg is None:
-            raise ValueError("guidance_model config required for autoguidance.")
+        guidance_model_cfg = build_guidance_ddt_config(guidance_cfg, model_config)
+        ag_ckpt = guidance_model_cfg.get("ckpt")
+        guidance_model_cfg = deepcopy(guidance_model_cfg)
+        guidance_model_cfg.pop("ckpt", None)
         guid_model: Stage2ModelProtocol = instantiate_from_config(guidance_model_cfg).to(device)
+        if ag_ckpt is None:
+            raise ValueError("AutoGuidance needs a bad DiTDH checkpoint via guidance_model.ckpt.")
+        load_guidance_ddt_weights(guid_model, ag_ckpt)
         guid_model.eval()
-        guid_model_forward = guid_model.forward
 
     log_steps = 0
     running_loss = 0.0
@@ -646,11 +706,12 @@ def main():
     running_loss_rae_w = 0.0
     start_time = time()
     use_guidance = guidance_scale > 1.0
+    use_cfg = use_guidance and guidance_method == "cfg"
     # Fixed noise for visual sampling
     zs = torch.randn(micro_batch_size, *latent_size, device=device, dtype=torch.float32)
     zs_rae = torch.randn(micro_batch_size, *latent_size_rae, device=device, dtype=torch.float32)
     n = micro_batch_size
-    if use_guidance:
+    if use_cfg:
         zs = torch.cat([zs, zs], dim=0)
         zs_rae = torch.cat([zs_rae, zs_rae], dim=0)
 
@@ -811,7 +872,7 @@ def main():
                 with torch.no_grad():
                     n_vis = min(9, micro_batch_size)
 
-                    if use_guidance:
+                    if use_cfg:
                         zs_samples = torch.cat([zs[:n_vis], zs[n:n + n_vis]], dim=0)
                         zs_rae_samples = torch.cat([zs_rae[:n_vis], zs_rae[n:n + n_vis]], dim=0)
                         y_cond = labels[:n_vis]
@@ -832,12 +893,15 @@ def main():
                         num_steps=sampler_params_pix.get("num_steps", 50),
                         cfg_scale=guidance_scale,
                         cfg_interval=(t_min, t_max),
+                        guidance_method=guidance_method,
+                        guidance_model=guid_model,
+                        ag_phase=ag_phase,
                         y=vis_y,
                     )
 
                     samples_pix = samples_pix.float()
 
-                    if use_guidance:
+                    if use_cfg:
                         samples_pix, _ = samples_pix.chunk(2, dim=0)
 
                     # [0, 1] range — just clamp (no (x+1)/2 shift)
@@ -849,7 +913,7 @@ def main():
                         wandb_utils.log_image(samples, global_step, key="samples/pixel", caption="Pixel Stream Samples")
                         if samples_rae is not None:
                             samples_rae = samples_rae.float()
-                            if use_guidance:
+                            if use_cfg:
                                 samples_rae, _ = samples_rae.chunk(2, dim=0)
                             decoded_rae = rae.decode(samples_rae)
                             decoded_rae = decoded_rae.cpu().float().clamp(0, 1)

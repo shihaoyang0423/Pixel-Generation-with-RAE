@@ -38,7 +38,7 @@ stage_2:
     use_adaln_zero: true
     direct_rae_in_channels: 768
 
-    stage2_ckpt: '/data/shihaoyang/pretrained/DiTs/Dinov2/wReg_base/ImageNet256/DiTDH-S_ep20/stage2_model.pt'
+    stage2_ckpt: '/home/shihaoyang/data/pretrained/DiTs/Dinov2/wReg_base/ImageNet256/DiTDH-S_ep20/stage2_model.pt'
     stage2_config:
       input_size: 16
       patch_size: 1
@@ -87,10 +87,14 @@ guidance:
   scale: 1.05
   t_min: 0.0
   t_max: 1.0
-  ag_phase: 'pixel'
+  # AutoGuidance is applied to the DiTDH/RAE condition path.
+  # Good DiTDH comes from stage_2.params.stage2_ckpt; bad DiTDH is below.
+  # Both receive the same class condition y.
+  ag_phase: 'condition'
   guidance_model:
-    # Same architecture as stage_2; ag_sweep.sh also passes --ag-ckpt.
-    ckpt: '/home/shihaoyang/data/ckpts/PixDDTv2/PixDDT_small_v2_project_free_layer_2_false_logit_normal_0.8_0.8_pix_ts_1_wo_lora_w_y_embed_adaln_zero/checkpoints/ep-0000020.pt'
+    # Compact form: the sampler inherits stage_2.params.stage2_config and
+    # instantiates stage2.models.DDT.DiTwDDTHead, not a PixelDDT head.
+    ckpt: '/home/shihaoyang/data/pretrained/DiTs/Dinov2/wReg_base/ImageNet256/DiTDH-S_ep14/stage2_model.pt'
 
 misc:
   latent_size: [3, 256, 256]

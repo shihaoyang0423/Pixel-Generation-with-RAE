@@ -1,563 +1,243 @@
----
-name: AutoGuidance for Sequential RAE-Pixel PixelDDT
-overview: 在现有 RAE -> s_clean -> PixelDDT 串行采样架构上，将 CFG 的 uncond 分支替换为 AutoGuidance 的 bad-model 分支。第一版以 Pixel Phase 3 AutoGuidance 为主，保持 Phase 1 RAE 轨迹稳定；后续再评估是否引入独立 RAE/DiTDH guidance model。
-todos:
-  - id: paper-alignment
-    content: 对照 AutoGuidance 与 RAE 论文，明确 AG 公式、bad model 选择、RAE 高维 latent 与 DDT head 的约束
-    status: pending
-  - id: sampling-config
-    content: 新增/扩展 sampling YAML 的 guidance.method=autoguidance 与 guidance_model 配置
-    status: pending
-  - id: sample-script
-    content: 在 sample_pix_ddt_project_free_layer.py 中读取 autoguidance，加载 guidance_model，并传给 sequential sampler
-    status: pending
-  - id: sampler
-    content: 在 project_sample_ode_naive 中新增 Pixel Phase 3 AG 分支，公式为 bad + scale * (good - bad)
-    status: pending
-  - id: optional-rae-ag
-    content: 评估是否增加 Phase 1 RAE AG；默认不启用，除非 bad/good RAE denoiser 确实不同
-    status: pending
-  - id: validation
-    content: 做小样本 smoke test、固定 seed 对比 CFG/AG、再跑 FID sweep
-    status: pending
-isProject: false
----
+# AutoGuidance
 
-# AutoGuidance 实验计划
+## 目标
 
-## 论文对齐
+在 sequential PixelDDT 采样里，把 AutoGuidance 用在 DiTDH/RAE condition 生成阶段。Pixel Head 不参与 good/bad model 外推；它只接收已经 guided 的 clean RAE condition。
 
-### AutoGuidance 要点
-
-AutoGuidance 来自 Karras et al. 的 *Guiding a Diffusion Model with a Bad Version of Itself*。它不是用 unconditional branch 做方向，而是用一个同条件、较弱的 bad model 做负方向：
+AutoGuidance 公式：
 
 ```text
-guided_output = bad_output + w * (good_output - bad_output)
+D_w(x, t, y) = D_bad(x, t, y) + w * (D_good(x, t, y) - D_bad(x, t, y))
 ```
 
-其中 `good_output` 和 `bad_output` 接收同一个 `x_t`、同一个 timestep、同一个条件 `y`。论文的动机是把 CFG 中纠缠的“条件对齐”和“质量提升”分开：bad model 代表较低质量/欠训练/小模型的预测，good - bad 更像质量改进方向，而不是 cond - uncond 的语义方向。
+其中：
 
-与 CFG 的差别：
+- `x` 是当前 RAE latent ODE state。
+- `t` 是 RAE/DiTDH timestep。
+- `y` 是同一个 class label condition。
+- `D_good` 是主 PixelDDT 模型内部 frozen DiTDH。
+- `D_bad` 是额外加载的 DiTDH guidance model。
+- `w` 对应 `guidance.scale`，`w=1.0` 退化为 good-only。
 
-| 方法 | 负方向来自 | 条件是否相同 | 是否需要训练 unconditional branch | 主要控制对象 |
-|---|---|---|---|---|
-| CFG | 同一个模型的 `y_null` 输出 | 否，`y_class` vs `y_null` | 是，通过 class dropout | 条件对齐 + 质量一起变 |
-| AutoGuidance | bad model 的 `y_class` 输出 | 是，good/bad 都吃 `y_class` | 否，但需要 bad model | 更偏质量方向 |
-
-因此在本 repo 里切换到 AG 时，不应该继续拼 `[y_class; y_null]` 当作核心逻辑。AG 第一版可以完全不走 `null_label=1000`，也不依赖 `null_s_clean`；它依赖的是一个输出形状、prediction type、数据范围都与 good model 一致的 guidance model。
-
-### RAE 论文约束
-
-RAE 论文把 VAE latent 替换为 DINO/SigLIP/MAE 等 representation encoder 的高维 latent，并配合训练出的 decoder。当前 repo 的 Stage 2 模型在 RAE latent 上使用 DiT/DDT 进行生成，关键特点是：
-
-- RAE latent 形状是 `[B, 768, 16, 16]`，高维且语义强。
-- 原始 RAE 采样是 latent diffusion：从 `z_rae` 去噪到 `x_rae_clean`，再由 RAE decoder 解码。
-- 我们当前项目不是直接输出 RAE decoder 图像，而是串行改造为：
-  1. RAE/DiTDH 先生成干净 latent；
-  2. 从干净 latent 抽 `s_clean`；
-  3. PixelDDT 用 `s_clean` 作为固定条件，直接在像素空间生成 `[B,3,256,256]`。
-
-这意味着 AutoGuidance 有两个可能作用点：RAE latent 流和 Pixel 流。但当前 free_layer 训练里，RAE/DiTDH backbone 通常由 `stage2_ckpt` 加载并冻结；Pixel Head 才是主要训练对象。所以第一版实验应优先放在 Pixel Phase 3。
-
-## 当前代码现状
-
-### 已有 AG 支持：单流 RAE/DDT
-
-`src/sample_ddp.py` 已经支持：
-
-```python
-guidance_method = guidance_config.get("method", "cfg")
-if guidance_scale > 1.0 and guidance_method == "autoguidance":
-    guid_model = instantiate_from_config(guid_model_config).to(device)
-    guid_model_forward = guid_model.forward
-...
-model_kwargs["additional_model_forward"] = guid_model_forward
-model_fn = model.forward_with_autoguidance
-```
-
-对应模型 `src/stage2/models/DDT.py` 里也已有：
-
-```python
-model_out = self.forward(x, t, y)
-ag_model_out = additional_model_forward(x, t, y)
-eps = ag_eps + cfg_scale * (eps - ag_eps)
-```
-
-这条路径说明 repo 原本理解了 AutoGuidance，但只接在单流 latent sampler 上。
-
-### 当前主路径：sequential PixelDDT 只支持 CFG
-
-我们当前使用的是：
-
-- `src/sample_pix_ddt_project_free_layer.py`
-- `src/train_stage3_projcet_free_layer.py::project_sample_ode_naive`
-- `src/stage2/models/PixelDDTv2_project_free_layer.py`
-
-采样脚本现在只读：
-
-```python
-guidance_scale = float(guidance_d.get("scale", 1.0))
-using_cfg = guidance_scale > 1.0
-```
-
-然后只要 `scale > 1` 就执行 CFG batch doubling：
-
-```python
-z_pix = torch.cat([z_pix, z_pix], dim=0)
-z_rae = torch.cat([z_rae, z_rae], dim=0)
-y_cfg = torch.cat([y, y_null], dim=0)
-```
-
-`project_sample_ode_naive` 也只会在 Phase 1 调：
-
-```python
-model.forward_rae_with_cfg(...)
-```
-
-在 Phase 3 调：
-
-```python
-model.forward_pix_with_cfg(...)
-```
-
-因此当前 `guidance.method: autoguidance` 即使写进 YAML，也不会生效。
-
-## 实验设计
-
-### 路线 A：不重新训练（优先第一版）
-
-第一版优先走“不重新训练”路线：good model 用当前最好/最终 PixelDDT checkpoint，bad model 用同架构但较早、较弱的 checkpoint。当前实验决定用 `ep20` checkpoint 作为 bad model；原先考虑过 `ep10`，但如果 `ep10.pt` 已删除，就不再依赖它。
+对当前 6*768 free_layer 模型，`D_good` 来自原始训练/采样配置里的 `stage_2.params.stage2_ckpt`：
 
 ```text
-good model = 当前最终/最好 checkpoint，例如 ep50 或 FID 最好的 ckpt
-bad model  = ep20 checkpoint，同架构、同配置、同输出接口
+/home/shihaoyang/data/pretrained/DiTs/Dinov2/wReg_base/ImageNet256/DiTDH-S_ep20/stage2_model.pt
 ```
 
-这条路线只改 sampling，不改 training loss，也不需要重新跑训练。要做的事情：
-
-1. 在采样 YAML 里把 `guidance.method` 改成 `autoguidance`。
-2. 在 `guidance.guidance_model.ckpt` 里填 `ep20` checkpoint 路径。
-3. 采样脚本加载 good model 和 bad model。
-4. 每个 Pixel ODE step 同时跑：
-
-```python
-good_pix = good_model.forward_pix(x_pix, t_pix, y, s_clean)
-bad_pix = bad_model.forward_pix(x_pix, t_pix, y, s_clean)
-guided = bad_pix + scale * (good_pix - bad_pix)
-```
-
-5. 做小 scale sweep，先看图，再跑 FID。
-
-`ep20` 作为 bad model 的判断：
-
-| 条件 | ep20 是否适合 |
-|---|---|
-| 与 good checkpoint 来自同一次训练 | 很适合，结构完全对齐 |
-| Pixel Head 已经学到基本图像结构 | 适合，bad 但不是纯噪声 |
-| ep20 太早，输出很差 | 可先用低 scale，例如 1.02 / 1.05 / 1.1 |
-| ep20 与 good 差异太小 | AG 方向会弱，需要换更早/更小模型 |
-
-推荐先跑：
+## 模块边界
 
 ```text
-AG scale = 1.00, 1.02, 1.05, 1.10, 1.20
-bad ckpt = ep20
-good ckpt = final/best
-ag_phase = pixel
+configs/stage2/sampling/...AG.yaml
+  声明 good DiTDH、bad DiTDH、guidance scale 和 interval。
+
+src/sample_pix_ddt_project_free_layer.py
+  采样入口。
+  负责加载 PixelDDT checkpoint、实例化 bad DiTDH、读取 CLI override。
+
+src/train_stage3_projcet_free_layer.py
+  sequential sampler 所在文件。
+  project_sample_ode_naive 负责 Phase 1/2/3 数据流和 AutoGuidance 混合。
+
+src/stage2/models/PixelDDTv2_project_free_layer.py
+  PixelDDT 模型定义。
+  model.ddt 是 good DiTDH。
+  forward_rae 运行 DiTDH RAE denoiser。
+  extract_clean_s 从 guided clean RAE latent 抽取 Pixel Head condition。
+  forward_pix 运行 Pixel Head。
+
+ag_sweep.sh
+  服务器实验入口。
+  sweep bad DiTDH checkpoint 和 guidance scale。
 ```
 
-其中 `scale=1.00` 是同一 AG 代码路径下的 good-only 对照，因为 `bad + 1.00 * (good - bad) = good`。
-
-这条路线的意义是快速回答：“当前 PixelDDT 是否能从 AutoGuidance 的 bad-model 方向受益？” 如果 ep20 结果已经有改善，就再考虑更系统地训练 weak bad model；如果完全没收益，也能避免盲目重训。
-
-### 路线 B：重新训练一个 bad model（第二阶段）
-
-如果 `ep20` 太差、太接近 good，或者没有合适中间 checkpoint，就需要专门训练一个 bad model。注意这里通常不是重训 good model，而是训练一个用于 AutoGuidance 的 weak/bad model。
-
-bad model 训练目标不是追求最强 FID，而是产生一个“会生成、但质量低于 good”的模型。它要满足接口兼容：
-
-- `target` 最好仍是 `stage2.models.PixelDDTv2_project_free_layer.PixelDDT`。
-- Pixel output shape 与 good 一致。
-- `prediction`、数据范围、`rae_inject_layers`、`use_y_embedder` 等配置与 good 对齐，除非明确做“小模型 bad”实验。
-- 采样时能调用同样的 `forward_pix(x_pix, t_pix, y, s_clean)`。
-
-可选训练方式：
-
-| 方式 | 做法 | 优点 | 风险 |
-|---|---|---|---|
-| 少训练步 bad | 用同架构训练 5/10/20 epoch 后停止 | 最贴近 “bad version of itself” | 需要额外训练时间 |
-| 小模型 bad | 降低 Pixel Head depth/hidden size | 与 AG 论文 smaller bad model 对齐 | 架构不同，配置和 ckpt 管理更复杂 |
-| 欠拟合 bad | 同架构但减少训练预算或数据 | 容易制造质量差距 | 太差会给出错误方向 |
-| 早停多 ckpt | 训练时保留多个中间 ckpt | 一次训练得到多个 bad 候选 | 需要存储和系统 sweep |
-
-重新训练 bad model 的建议顺序：
-
-1. 复用 good model 的 training YAML，先保持同架构。
-2. 训练到较早 epoch，例如 `ep5/ep10/ep20`，每个都保存 EMA。
-3. 不需要让 bad model 达到 good 的 FID；只要它能生成同分布的粗图像即可。
-4. 用同一个 good checkpoint，对多个 bad checkpoint 做 AG sweep。
-5. 如果同架构早停 bad 有收益，再考虑小模型 bad。
-
-不建议第一步就重新训练 good model，原因：
-
-- AutoGuidance 是 sampling-time 方法，核心逻辑不改变 good model 的训练 loss。
-- 现有 final/best checkpoint 已经可以作为 good model。
-- 先用 `ep20` 做 bad model 可以快速验证方向，成本极低。
-- 重训会把“AG 是否有效”和“新模型是否训好”混在一起，排查更慢。
-
-### 第一版：Pixel Phase 3 AutoGuidance
-
-```text
-Phase 1: RAE ODE
-  z_rae -> x_rae_clean
-  默认不用 AG，保持当前条件 RAE 轨迹
-
-Phase 2: Extract s_clean
-  x_rae_clean -> s_clean
-  只抽一次，作为 good/bad Pixel Head 的共同条件
-
-Phase 3: Pixel ODE
-  good_pix = good_model.forward_pix(x_pix, t_pix, y, s_clean)
-  bad_pix  = bad_model.forward_pix(x_pix, t_pix, y, s_clean)
-  guided   = bad_pix + ag_scale * (good_pix - bad_pix)
-```
-
-核心原因：如果 good/bad 两个 PixelDDT 都使用同一个冻结 `stage2_ckpt`，它们的 `forward_rae` 基本相同；Phase 1 AG 没有有效方向。Pixel Head 才是当前实验真正训练出的部分，bad checkpoint 的差异会体现在 Pixel 输出上。
+## 数据流
 
 ```mermaid
-flowchart TB
-    zrae["z_rae ~ N(0,1)"] --> ph1["Phase 1 RAE ODE<br/>good model forward_rae<br/>no AG by default"]
-    ph1 --> xclean["x_rae_clean"]
-    xclean --> ph2["Phase 2 extract_clean_s"]
-    ph2 --> sclean["s_clean<br/>shared by good and bad"]
-
-    zpix["z_pix ~ N(0,1)"] --> loop["Phase 3 Pixel ODE"]
-    sclean --> good["good.forward_pix(x_pix,t,y,s_clean)"]
-    sclean --> bad["bad.forward_pix(x_pix,t,y,s_clean)"]
-    loop --> good
-    loop --> bad
-    good --> mix["bad + scale*(good-bad)"]
-    bad --> mix
-    mix --> drift["compute_ode_drift"]
-    drift --> loop
-    loop --> image["x_pix_final [0,1]"]
+flowchart TD
+    A["z_rae ~ N(0, I)"] --> B["Phase 1: RAE ODE state x_rae(t)"]
+    Y["class label y"] --> G["Good DiTDH: model.forward_rae(x_rae, t_rae, y)"]
+    Y --> H["Bad DiTDH: guidance_model(x_rae, t_rae, y)"]
+    B --> G
+    B --> H
+    G --> I["AutoGuidance mix: bad + scale * (good - bad)"]
+    H --> I
+    I --> J["ODE update x_rae"]
+    J --> B
+    J --> K["guided z_rae_clean"]
+    K --> L["Phase 2: model.extract_clean_s(z_rae_clean, y)"]
+    Y --> L
+    L --> M["s_clean"]
+    N["z_pix ~ N(0, I)"] --> O["Phase 3: Pixel ODE"]
+    M --> O
+    Y --> O
+    O --> P["model.forward_pix(x_pix, t_pix, y, s_clean)"]
+    P --> Q["pixel sample"]
 ```
 
-### bad model 选择
+## Sampler 接口
 
-bad model 必须满足：
-
-- `stage_2.target` 与 good model 兼容，最好同为 `stage2.models.PixelDDTv2_project_free_layer.PixelDDT`。
-- 输出 shape 与 good 完全一致。
-- `transport.prediction` 一致。当前 Pixel 流是 `prediction: data`，RAE 流是 `prediction: velocity`。
-- Pixel 输入范围一致：当前 project/free_layer 版本输出按 `[0,1]` clamp，不做 `(x+1)/2`。
-- `rae_inject_layers`、`rae_inject_final_layer`、`use_y_embedder` 等结构参数必须能加载 guidance checkpoint。
-
-推荐优先级：
-
-| bad model | 优点 | 风险 |
-|---|---|---|
-| 同一次训练的早期 epoch EMA | 架构完全一致，最稳 | bad 可能太差或太接近，需要 sweep |
-| 同架构但更少训练步 checkpoint | 符合 AG 论文“less-trained”设定 | 需要保留历史 ckpt |
-| 更小 PixelDDT head | 更像论文中的 smaller model | 需要单独训练，且 `forward_pix` shape 要匹配 |
-| 普通 DiTDH-S RAE guidance model | 已有 AG YAML 类似写法 | 只能指导 RAE latent，不能直接指导 Pixel Phase 3 |
-
-第一版建议使用同架构早期 checkpoint，例如：
-
-```yaml
-guidance:
-  method: autoguidance
-  scale: 1.2
-  t_min: 0.0
-  t_max: 1.0
-  ag_phase: pixel
-  guidance_model:
-    target: stage2.models.PixelDDTv2_project_free_layer.PixelDDT
-    params:
-      # 必须与 good model architecture 对齐
-    ckpt: /path/to/earlier-or-weaker/ep-xxxx.pt
-```
-
-## 关键代码位置与计划改动
-
-### 1. `configs/stage2/sampling/...yaml`
-
-当前：
-
-```yaml
-guidance:
-  method: 'cfg'
-  scale: 1.0
-  t_min: 0.0
-  t_max: 1.0
-```
-
-计划新增一个 AG sampling config，避免覆盖 CFG baseline：
-
-```text
-configs/stage2/sampling/ImageNet256/PixDDT_small_v2_lora_project_free_layer_AG.yaml
-```
-
-新增字段：
-
-```yaml
-guidance:
-  method: autoguidance
-  scale: 1.2
-  t_min: 0.0
-  t_max: 1.0
-  ag_phase: pixel
-  guidance_model:
-    target: stage2.models.PixelDDTv2_project_free_layer.PixelDDT
-    params:
-      # 与 good model 一致，或明确的小 bad model 架构
-    ckpt: /path/to/bad_model.pt
-```
-
-### 2. `src/sample_pix_ddt_project_free_layer.py`
-
-现有读取 guidance 的位置在 `# ---- Guidance settings ----`。需要改成：
-
-```python
-guidance_method = guidance_d.get("method", "cfg")
-guidance_scale = float(guidance_d.get("scale", 1.0))
-ag_phase = guidance_d.get("ag_phase", "pixel")
-```
-
-当 `guidance_method == "autoguidance" and guidance_scale > 1.0`：
-
-1. 从 `guidance_d["guidance_model"]` instantiate bad model。
-2. 加载 bad model checkpoint。注意 `instantiate_from_config` 对 `stage_2.ckpt` 是否自动加载要检查；当前 good model 是脚本手动用 `--ckpt` 加载的，所以 guidance model 也建议脚本显式加载，避免 YAML 里的 `ckpt` 被忽略。
-3. 不做 CFG 的 `[cond; uncond]` doubling。
-4. 调用：
+核心函数：
 
 ```python
 project_sample_ode_naive(
     z_pix,
     z_rae,
     model,
-    guidance_model=guid_model,
-    guidance_method="autoguidance",
-    ag_phase="pixel",
-    cfg_scale=guidance_scale,
-    cfg_interval=(t_min, t_max),
-    y=y,
+    transport_pix,
+    transport_rae,
+    num_steps=50,
+    cfg_scale=1.0,
+    cfg_interval=(0.0, 1.0),
+    guidance_method="cfg",
+    guidance_model=None,
+    ag_phase="condition",
+    y=labels,
 )
 ```
 
-CFG 仍保留原逻辑，作为 baseline。
+AutoGuidance 相关参数：
 
-### 3. `src/train_stage3_projcet_free_layer.py::project_sample_ode_naive`
+| 参数 | 类型 | 作用 |
+| --- | --- | --- |
+| `guidance_method` | `"cfg"` or `"autoguidance"` | 选择 CFG 或 AG。 |
+| `cfg_scale` | `float` | CFG/AG 共用 scale 字段；AG 中是 `w`。 |
+| `cfg_interval` | `(float, float)` | 只在指定 RAE timestep interval 内混合 good/bad 输出。 |
+| `guidance_model` | `DiTwDDTHead` | bad DiTDH denoiser。AG 开启时必需。 |
+| `ag_phase` | `"condition"` or `"rae"` | 当前两者等价，表示 AG 作用在 DiTDH/RAE condition path。 |
+| `y` | `Tensor[B]` | class condition。AG 不拼 null label。 |
 
-该函数是实际三阶段采样器，需要新增参数：
-
-```python
-guidance_method="cfg"
-guidance_model=None
-ag_phase="pixel"
-```
-
-内部判断：
-
-```python
-using_guidance = cfg_scale > 1.0
-using_cfg = using_guidance and guidance_method == "cfg"
-using_ag = using_guidance and guidance_method == "autoguidance"
-```
-
-#### Phase 1
-
-第一版默认不做 AG：
+AG 分支内部调用：
 
 ```python
-model_out_rae = model.forward_rae(x_rae, t_rae_batch, y)
+good_rae = model.forward_rae(x_rae, t_rae_batch, y)
+bad_rae = guidance_model(x_rae, t_rae_batch, y)
+model_out_rae = bad_rae + cfg_scale * (good_rae - bad_rae)
 ```
 
-可选扩展：
+然后用 `model_out_rae` 更新 RAE ODE state。Pixel ODE 不做 AG 混合。
 
-```python
-if using_ag and ag_phase in ("rae", "both"):
-    good = model.forward_rae(x_rae, t_rae_batch, y)
-    bad = guidance_model.forward_rae(x_rae, t_rae_batch, y)
-    model_out_rae = apply_ag(good, bad, t_rae_batch)
+## Config 接口
+
+采样 YAML：
+
+```yaml
+stage_2:
+  target: stage2.models.PixelDDTv2_project_free_layer.PixelDDT
+  params:
+    stage2_ckpt: /home/shihaoyang/data/pretrained/DiTs/Dinov2/wReg_base/ImageNet256/DiTDH-S_ep20/stage2_model.pt
+    stage2_config:
+      input_size: 16
+      patch_size: 1
+      in_channels: 768
+      hidden_size: [384, 2048]
+      depth: [12, 2]
+      num_heads: [6, 16]
+      ...
+
+guidance:
+  method: autoguidance
+  scale: 1.05
+  t_min: 0.0
+  t_max: 1.0
+  ag_phase: condition
+  guidance_model:
+    ckpt: /home/shihaoyang/data/pretrained/DiTs/Dinov2/wReg_base/ImageNet256/DiTDH-S_ep14/stage2_model.pt
 ```
 
-但这只有在 good/bad 的 RAE denoiser 确实不同的时候才有意义。否则只是多跑一次相同 frozen DiTDH。
+Compact `guidance_model` 规则：
 
-#### Phase 2
+- 如果 `guidance_model.target` 缺省，采样脚本会自动使用 `stage2.models.DDT.DiTwDDTHead`。
+- `guidance_model.params` 会继承 `stage_2.params.stage2_config`。
+- `guidance_model.ckpt` 只负责加载 bad DiTDH 权重。
 
-第一版使用 good model 的 RAE trajectory 和 good model 的 extractor：
+显式写法也支持：
 
-```python
-s_clean = model.extract_clean_s(x_rae_clean, y)
+```yaml
+guidance:
+  guidance_model:
+    target: stage2.models.DDT.DiTwDDTHead
+    params:
+      input_size: 16
+      patch_size: 1
+      in_channels: 768
+      hidden_size: [384, 2048]
+      depth: [12, 2]
+      num_heads: [6, 16]
+      ...
+    ckpt: /home/shihaoyang/data/pretrained/DiTs/Dinov2/wReg_base/ImageNet256/DiTDH-S_ep14/stage2_model.pt
 ```
 
-不建议第一版用 bad model 抽 `s_clean`，因为 Pixel Head 训练时看到的是 good/current model 风格的 `s_clean`。AG 的差异应先限制在 Pixel prediction 上。
+## CLI 接口
 
-#### Phase 3
+采样脚本入口：
 
-核心 AG 混合：
-
-```python
-good_out_pix = model.forward_pix(x_pix, t_pix_batch, y, s_clean)
-bad_out_pix = guidance_model.forward_pix(x_pix, t_pix_batch, y, s_clean)
-model_out_pix = apply_autoguidance(
-    good_out_pix,
-    bad_out_pix,
-    t_pix_batch,
-    cfg_scale,
-    cfg_interval,
-    channels=model.in_channels,
-)
+```bash
+torchrun --standalone --nnodes=1 --nproc_per_node=4 \
+  src/sample_pix_ddt_project_free_layer.py \
+  --config configs/stage2/sampling/ImageNet256/PixDDT_6x768_project_free_layer_2_false_pix_ts1_AG.yaml \
+  --ckpt /home/shihaoyang/data/ckpts/PixDDTv2/.../checkpoints/ep-0000050.pt \
+  --guidance-method autoguidance \
+  --ag-phase condition \
+  --ag-ckpt /home/shihaoyang/data/pretrained/DiTs/Dinov2/wReg_base/ImageNet256/DiTDH-S_ep14/stage2_model.pt \
+  --cfg-scale 1.05 \
+  --t-min 0.0 \
+  --t-max 1.0
 ```
 
-辅助函数：
+CLI override 优先级：
 
-```python
-def apply_autoguidance(good_out, bad_out, t, scale, interval, channels):
-    good_eps = good_out[:, :channels]
-    bad_eps = bad_out[:, :channels]
-    rest = good_out[:, channels:]
-    mask = ((t >= interval[0]) & (t <= interval[1])).view(-1, *[1] * (good_eps.ndim - 1))
-    guided_eps = torch.where(mask, bad_eps + scale * (good_eps - bad_eps), good_eps)
-    return torch.cat([guided_eps, rest], dim=1) if rest.shape[1] > 0 else guided_eps
-```
-
-注意：这里的变量名沿用旧代码的 `eps` 习惯，但 Pixel transport 当前可能是 `prediction=data`。实现上应对“模型输出的前 `in_channels`”做 AG，而不是假设它一定是 epsilon。
-
-### 4. `src/stage2/models/PixelDDTv2_project_free_layer.py`
-
-模型里已经有 `forward_with_autoguidance`，但这是 joint forward 接口：
-
-```python
-forward_with_autoguidance(self, x_pix, x_rae, t_pix, t_rae, y, ...)
-```
-
-sequential sampler 不适合直接用它，因为 sampler 已经拆成：
-
-- `forward_rae`
-- `extract_clean_s`
-- `forward_pix`
-
-因此第一版不需要强改模型类。更清晰的做法是在 sampler 中组合 good/bad 的 phase-specific output。
-
-后续如果想整理接口，可以新增：
-
-```python
-forward_rae_with_autoguidance(...)
-forward_pix_with_autoguidance(...)
-```
-
-但不作为第一版必要项。
-
-## 数据流对比
-
-### 当前 CFG 数据流
-
-```mermaid
-flowchart TB
-    z["z duplicated"] --> cond["cond half: y_class"]
-    z --> uncond["uncond half: y_null"]
-    cond --> f1["same model forward"]
-    uncond --> f2["same model forward"]
-    f1 --> mix["uncond + scale*(cond-uncond)"]
-    f2 --> mix
-```
-
-### 计划 AG 数据流
-
-```mermaid
-flowchart TB
-    x["same x_t"]
-    y["same y_class"]
-    x --> good["good model"]
-    y --> good
-    x --> bad["bad model"]
-    y --> bad
-    good --> mix["bad + scale*(good-bad)"]
-    bad --> mix
-```
-
-### 放到 RAE-Pixel 串行架构里
-
-```mermaid
-sequenceDiagram
-    participant N as Noise
-    participant R as Good RAE/DiTDH
-    participant E as extract_clean_s
-    participant G as Good PixelDDT
-    participant B as Bad PixelDDT
-    participant O as ODE update
-
-    N->>R: z_rae, y, t_rae
-    R-->>E: x_rae_clean
-    E-->>G: s_clean
-    E-->>B: s_clean
-    loop Pixel ODE steps
-        N->>G: x_pix, t_pix, y, s_clean
-        N->>B: x_pix, t_pix, y, s_clean
-        G-->>O: good_output
-        B-->>O: bad_output
-        O-->>N: x_pix += drift(bad + scale*(good-bad))
-    end
-```
+| CLI 参数 | 覆盖 YAML 字段 |
+| --- | --- |
+| `--guidance-method` | `guidance.method` |
+| `--ag-phase` | `guidance.ag_phase` |
+| `--ag-ckpt` | `guidance.guidance_model.ckpt` |
+| `--cfg-scale` | `guidance.scale` |
+| `--t-min` | `guidance.t_min` |
+| `--t-max` | `guidance.t_max` |
 
 ## 实验矩阵
 
-第一轮小 sweep：
+服务器 checkpoint 目录：
 
-| 实验 | method | bad model | scale | Phase 1 | Phase 3 |
-|---|---|---|---|---|---|
-| baseline | cfg | none | 1.0 | no guidance | no guidance |
-| CFG baseline | cfg | none | 1.2 / 1.5 / 2.0 | current CFG | current CFG |
-| AG-early | autoguidance | early same-arch ckpt | 1.05 / 1.1 / 1.2 / 1.4 | no AG | AG |
-| AG-weak | autoguidance | intentionally weaker PixelDDT | 1.05 / 1.1 / 1.2 | no AG | AG |
-| AG-both optional | autoguidance | different RAE + Pixel model | TBD | AG | AG |
-
-建议先用 1k 或 5k samples 看图和粗 FID，再跑 50k FID。AutoGuidance 的 scale 通常不应照搬 CFG scale；它的方向不是 cond-uncond，scale 过大可能导致过锐、过饱和或偏离 Pixel Head 的训练分布。
-
-## 风险与检查项
-
-- **bad model 太接近 good**：`good - bad` 很小，AG 几乎无效。
-- **bad model 太差**：方向可能不稳定，scale 稍大就崩。
-- **Phase 1 AG 可能无效**：如果 RAE/DiTDH backbone 相同且冻结，good/bad `forward_rae` 输出相同。
-- **guidance_model ckpt 加载**：需要明确 checkpoint key 是 `ema`、`model` 还是 raw state dict，并与 good model 加载逻辑一致。
-- **DDP 显存翻倍**：AG 每个 Pixel ODE step 要多跑一次 bad model；但不需要 CFG batch doubling。若 batch 不翻倍，计算量约为两次 model forward，显存可能比 CFG 更友好但耗时接近。
-- **s_clean 分布**：第一版只用 good `s_clean`，避免 bad extractor 改变 Pixel 条件分布。
-- **prediction type 命名**：代码里的 `eps` 只是历史变量名。Pixel 流是 `prediction=data` 时，AG 仍对 model raw output 混合，再交给 `compute_ode_drift`。
-
-## 最小落地顺序
-
-1. 保留 CFG baseline 不动，新建 `_AG.yaml`。
-2. 在 `sample_pix_ddt_project_free_layer.py` 增加 autoguidance 分支和 guidance model 加载。
-3. 在 `project_sample_ode_naive` 增加 `guidance_method/guidance_model/ag_phase` 参数。
-4. 只实现 `ag_phase="pixel"`。
-5. 用小 batch、少步数 smoke test：
-
-```bash
-torchrun --standalone --nnodes=1 --nproc_per_node=1 \
-  src/sample_pix_ddt_project_free_layer.py \
-  --config configs/stage2/sampling/ImageNet256/PixDDT_small_v2_lora_project_free_layer_AG.yaml \
-  --ckpt /path/to/good.pt \
-  --sample-dir /tmp/ag_smoke \
-  --num-fid-samples 16 \
-  --per-proc-batch-size 4 \
-  --num-steps 4 \
-  --precision fp32 \
-  --label-sampling random
+```text
+/home/shihaoyang/data/pretrained/DiTs/Dinov2/wReg_base/ImageNet256
 ```
 
-6. 固定 seed 对比：
-   - CFG scale 1.0
-   - CFG scale 若干
-   - AG scale 若干
-7. 确认输出无 NaN、范围正常、图像没有明显崩坏后，再跑 FID。
+当前 sweep：
 
-## 参考
+| 角色 | Checkpoint |
+| --- | --- |
+| good DiTDH | `DiTDH-S_ep20/stage2_model.pt`，由 `stage_2.params.stage2_ckpt` 加载 |
+| bad DiTDH | `DiTDH-S_ep14/stage2_model.pt`，作为 AG guidance model |
+| same-as-good control | `DiTDH-S_ep20/stage2_model.pt`，只用于 sanity check |
 
-- AutoGuidance paper: arXiv:2406.02507, *Guiding a Diffusion Model with a Bad Version of Itself*.
-- RAE paper: arXiv:2510.11690, *Diffusion Transformers with Representation Autoencoders*.
-- Existing single-stream AG implementation: `src/sample_ddp.py`, `src/stage2/models/DDT.py`.
-- Current sequential sampler: `src/train_stage3_projcet_free_layer.py::project_sample_ode_naive`.
-- Current project sampler script: `src/sample_pix_ddt_project_free_layer.py`.
-- Current PixelDDT phase methods: `src/stage2/models/PixelDDTv2_project_free_layer.py::forward_rae`, `extract_clean_s`, `forward_pix`.
+Scale：
+
+```text
+1.00, 1.02, 1.05, 1.10, 1.20
+```
+
+首轮 interval：
+
+```text
+t_min=0.0, t_max=1.0
+```
+
+`same-as-good control=ep20` 不是 bad model；它只用于确认当 guidance model 和 good DiTDH 权重相同时，AG 方向应接近零。`scale=1.00` 是 good-only control。
+
+## 实现约束
+
+- AG 不使用 null label。
+- AG batch size 保持 `B`，不拼 `[cond; uncond]`。
+- good/bad DiTDH 的 latent shape、prediction type、transport setting、time parameterization 必须一致。
+- `pixel_only` 模型没有 DiTDH condition path，不能使用 AG。
+- PixelDDT checkpoint 通过 `--ckpt` 加载，只提供 Pixel Head 权重；bad model checkpoint 通过 `guidance_model.ckpt` 或 `--ag-ckpt` 加载。
+
+## 验证清单
+
+- `python3 -m py_compile src/sample_pix_ddt_project_free_layer.py src/train_stage3_projcet_free_layer.py`
+- `bash -n ag_sweep.sh`
+- `scale=1.00` 输出作为 good-only control。
+- `same-as-good control=DiTDH-S_ep20` 相对 good DiTDH 应接近无 AG 方向。
+- `bad=DiTDH-S_ep14` 用于主要 AG sweep。

@@ -135,6 +135,13 @@ def select_state_dict(ckpt_data: object) -> dict:
     return ckpt_data
 
 
+def strip_module_prefix(state_dict: dict) -> dict:
+    return {
+        (k[7:] if k.startswith("module.") else k): v
+        for k, v in state_dict.items()
+    }
+
+
 def add_legacy_free_layer_keys(state_dict: dict, model: torch.nn.Module) -> dict:
     """Map single-stage free_layer checkpoints to the current ModuleList names."""
     model_keys = model.state_dict().keys()
@@ -154,12 +161,24 @@ def add_legacy_free_layer_keys(state_dict: dict, model: torch.nn.Module) -> dict
 def load_model_weights(model: torch.nn.Module, ckpt_path: str, *, rank: int, label: str) -> None:
     ckpt_data = torch.load(ckpt_path, map_location="cpu")
     state_dict = select_state_dict(ckpt_data)
+    state_dict = strip_module_prefix(state_dict)
     state_dict = add_legacy_free_layer_keys(state_dict, model)
     if rank == 0:
         key = "ema" if isinstance(ckpt_data, dict) and "ema" in ckpt_data else (
             "model" if isinstance(ckpt_data, dict) and "model" in ckpt_data else "raw"
         )
         print(f"Loading {label} weights ({key}) from {ckpt_path}")
+    model.load_state_dict(state_dict, strict=True)
+
+
+def load_guidance_weights(model: torch.nn.Module, ckpt_path: str, *, rank: int) -> None:
+    ckpt_data = torch.load(ckpt_path, map_location="cpu")
+    state_dict = strip_module_prefix(select_state_dict(ckpt_data))
+    if rank == 0:
+        key = "ema" if isinstance(ckpt_data, dict) and "ema" in ckpt_data else (
+            "model" if isinstance(ckpt_data, dict) and "model" in ckpt_data else "raw"
+        )
+        print(f"Loading AutoGuidance DiTDH bad-model weights ({key}) from {ckpt_path}")
     model.load_state_dict(state_dict, strict=True)
 
 
@@ -174,11 +193,21 @@ def build_guidance_model_config(guidance_d: dict, model_config):
     # Allow a compact config:
     # guidance_model:
     #   ckpt: /path/to/bad.pt
-    # It inherits target/params from stage_2 so same-architecture bad checkpoints
-    # do not need a huge duplicated YAML block.
+    # It inherits the DiTDH stage2_config from PixelDDT, not the Pixel Head.
+    # AutoGuidance should compare good/bad DiTDH denoisers under the same
+    # condition; the Pixel Head only consumes the resulting guided condition.
     if "target" not in guidance_model_cfg:
         ckpt = guidance_model_cfg.get("ckpt")
-        guidance_model_cfg = copy.deepcopy(base_cfg)
+        stage2_params = copy.deepcopy(base_cfg.get("params", {}).get("stage2_config"))
+        if stage2_params is None:
+            raise ValueError(
+                "Compact AutoGuidance config requires stage_2.params.stage2_config "
+                "so the bad DiTDH model can be built."
+            )
+        guidance_model_cfg = {
+            "target": "stage2.models.DDT.DiTwDDTHead",
+            "params": stage2_params,
+        }
         if ckpt is not None:
             guidance_model_cfg["ckpt"] = ckpt
 
@@ -309,7 +338,7 @@ def main(args: argparse.Namespace) -> None:
         raise ValueError(f"Unknown guidance method: {guidance_method!r}")
 
     guidance_model = None
-    ag_phase = str(guidance_d.get("ag_phase", "pixel")).lower()
+    ag_phase = str(guidance_d.get("ag_phase", "condition")).lower()
     if args.ag_phase is not None:
         ag_phase = args.ag_phase.lower()
     if using_ag:
@@ -319,8 +348,8 @@ def main(args: argparse.Namespace) -> None:
         guidance_model_cfg.pop("ckpt", None)
         guidance_model: Stage2ModelProtocol = instantiate_from_config(guidance_model_cfg).to(device)
         if ag_ckpt is None:
-            raise ValueError("AutoGuidance needs a bad-model checkpoint via guidance_model.ckpt or --ag-ckpt.")
-        load_model_weights(guidance_model, ag_ckpt, rank=rank, label="AutoGuidance bad model")
+            raise ValueError("AutoGuidance needs a bad DiTDH checkpoint via guidance_model.ckpt or --ag-ckpt.")
+        load_guidance_weights(guidance_model, ag_ckpt, rank=rank)
         guidance_model.eval()
 
     # ---- Output folder ----
@@ -466,8 +495,8 @@ if __name__ == "__main__":
                         help="Override guidance.method from config.")
     parser.add_argument("--ag-ckpt", type=str, default=None,
                         help="Override guidance.guidance_model.ckpt for AutoGuidance bad model.")
-    parser.add_argument("--ag-phase", type=str, choices=["pixel", "rae", "both"], default=None,
-                        help="Which phase to apply AutoGuidance to. Default comes from config.")
+    parser.add_argument("--ag-phase", type=str, choices=["condition", "rae"], default=None,
+                        help="Apply AutoGuidance to the DiTDH/RAE condition path.")
     parser.add_argument("--naive", action="store_true",
                         help="Ignored (project version always uses Euler; kept for CLI compat).")
 
