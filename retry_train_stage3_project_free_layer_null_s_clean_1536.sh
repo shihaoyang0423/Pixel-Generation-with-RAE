@@ -7,11 +7,13 @@
 
 set -e
 
-export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}
-export EXPERIMENT_NAME=${EXPERIMENT_NAME:-PixDDT_project_free_layer_1_4_7_10_16_1536_DiTDHXL_null_s_clean}
+unset EXPERIMENT_NAME
 
-TRAIN_CONFIG_SRC=${TRAIN_CONFIG_SRC:-/home/shihaoyang/RAE/configs/stage2/training/PixelDDT_free_layer_1_4_7_10_16_1536_DiTDHXL_null_s_clean.yaml}
-SAMPLE_CONFIG_SRC=${SAMPLE_CONFIG_SRC:-/home/shihaoyang/RAE/configs/stage2/sampling/ImageNet256/PixelDDT_free_layer_1_4_7_10_16_1536_DiTDHXL_null_s_clean_pix_ts3.yaml}
+export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}
+export EXPERIMENT_NAME=${EXPERIMENT_NAME:-PixDDT_project_free_layer_6_16_1536_DiTDHXL_null_s_clean}
+
+TRAIN_CONFIG_SRC=${TRAIN_CONFIG_SRC:-/home/shihaoyang/RAE/configs/stage2/training/PixelDDT_free_layer_6_16_1536_DiTDHXL_null_s_clean.yaml}
+SAMPLE_CONFIG_SRC=${SAMPLE_CONFIG_SRC:-/home/shihaoyang/RAE/configs/stage2/sampling/ImageNet256/PixelDDT_free_layer_6_16_1536_DiTDHXL_null_s_clean_pix_ts3.yaml}
 
 CKPT_DIR="/home/shihaoyang/data/ckpts/PixDDTv2/${EXPERIMENT_NAME}/checkpoints"
 

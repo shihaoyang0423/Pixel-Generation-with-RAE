@@ -49,13 +49,14 @@ torchrun --standalone --nnodes=1 --nproc_per_node=8 \
 # 我们的
 torchrun --standalone --nnodes=1 --nproc_per_node=8 \
   src/sample_pix_ddt_project_free_layer.py \
-  --config configs/stage2/sampling/ImageNet256/PixDDT_small_v2_lora_project_free_layer.yaml \
-  --ckpt /home/shihaoyang/data/ckpts/PixDDTv2/PixDDT_small_v2_project_free_layer_1_3_5_7_false_wo_lora_w_y_embed_adaln_zero_12_768/checkpoints/ep-0000050.pt \
-  --sample-dir /home/shihaoyang/data/samples/PixDDT_small_v2_project_free_layer_1_3_5_7_false_wo_lora_w_y_embed_adaln_zero_12_768 \
-  --num-fid-samples 50000 \
+  --config /home/shihaoyang/RAE/configs/stage2/sampling/ImageNet256/PixDDT_free_layer_1_3_5_7_wo_lora_w_y_embed_adaln_zero_12_1152_DiTDHXL_null_s_clean_pix_ts3.yaml \
+  --ckpt /home/shihaoyang/data/ckpts/PixDDTv2/PixDDT_project_free_layer_1_3_5_7_false_wo_lora_w_y_embed_adaln_zero_12_1152_DiTDHXL_null_s_clean/checkpoints/ep-0000080.pt \
+  --sample-dir /home/shihaoyang/data/samples/PixDDT_project_free_layer_1_3_5_7_false_wo_lora_w_y_embed_adaln_zero_12_1152_DiTDHXL_null_s_clean \
+  --num-fid-samples 5000 \
   --per-proc-batch-size 64 \
   --precision fp32 \
   --label-sampling equal \
+  --s-clean-cfg-mode null \
   --naive
 
 # ========================
@@ -66,7 +67,7 @@ cd ~/RAE/src
 
 # 默认 0 号 GPU，--arr1 根据需要修改
 python -m eval.fid \
-  --arr1 /home/shihaoyang/data/samples/PixDDT_small_v2_project_free_layer_1_3_5_7_false_wo_lora_w_y_embed_adaln_zero_12_768/PixelDDT-project-ep-0000050-cfg1.00-bs64-euler50-fp32.npz \
+  --arr1 /home/shihaoyang/data/samples/PixDDT_project_free_layer_1_3_5_7_false_wo_lora_w_y_embed_adaln_zero_12_1152_DiTDHXL_null_s_clean/PixelDDT-project-ep-0000080-cfg1.40-sclean-null-bs64-euler100-fp32.npz \
   --ref /home/shihaoyang/data/data/VIRTUAL_imagenet256_labeled.npz \
   --ref-mu-key mu \
   --ref-sigma-key sigma

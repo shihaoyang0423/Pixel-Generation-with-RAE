@@ -75,7 +75,7 @@ sampler:
   mode: ODE
   params:
     sampling_method: 'euler'
-    num_steps: 50
+    num_steps: 75  # 50
 
 sampler_rae:
   mode: ODE
@@ -85,7 +85,7 @@ sampler_rae:
 
 guidance:
   method: 'cfg'
-  scale: 1.0
+  scale: 1.4  # 1.0
   t_min: 0.0
   t_max: 1.0
 
@@ -93,7 +93,7 @@ misc:
   latent_size: [3, 256, 256]
   num_classes: 1000
   # pix_time_shift = sqrt(36864 / 4096) = 3.0
-  time_dist_shift_dim: 36864
+  time_dist_shift_dim: 65536  # 36864
   time_dist_shift_base: 4096
 
 misc_rae:
