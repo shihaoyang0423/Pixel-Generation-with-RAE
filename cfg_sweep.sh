@@ -7,7 +7,7 @@
 #   CFG_SCALES="1.2 1.4 1.6 1.8" bash cfg_sweep.sh
 #   NUM_FID_SAMPLES=50000 bash cfg_sweep.sh
 #
-# Env knobs: NPROC=8, NUM_FID_SAMPLES=5000, BATCH_SIZE=64, PIX_TS=1.
+# Env knobs: NPROC=<visible GPU count>, NUM_FID_SAMPLES=5000, BATCH_SIZE=64, PIX_TS=1.
 
 set -e
 
@@ -15,10 +15,11 @@ EXPERIMENT_NAME=${EXPERIMENT_NAME:-PixDDT_project_free_layer_6_16_1536_DiTDHXL_n
 EP=${EP:-0000050}
 CKPT=${CKPT:-/home/shihaoyang/data/ckpts/PixDDTv2/PixDDT_project_free_layer_6_16_1536_DiTDHXL_null_s_clean/checkpoints/ep-0000050.pt}
 CONFIG=${CONFIG:-configs/stage2/sampling/ImageNet256/PixelDDT_free_layer_6_16_1536_DiTDHXL_null_s_clean_pix_ts3.yaml}
-SAMPLE_BASE=${SAMPLE_BASE:-/home/shihaoyang/data/samples/${EXPERIMENT_NAME}/cfg_sweep_ep${EP}_pixts1}
 REF=${REF:-/home/shihaoyang/data/data/VIRTUAL_imagenet256_labeled.npz}
 PYTHON=${PYTHON:-/home/shihaoyang/miniconda3/envs/rae/bin/python}
-NPROC=${NPROC:-8}
+if [ -z "${NPROC:-}" ]; then
+    NPROC=$("$PYTHON" -c "import torch; print(max(torch.cuda.device_count(), 1))")
+fi
 NUM_FID_SAMPLES=${NUM_FID_SAMPLES:-5000}
 BATCH_SIZE=${BATCH_SIZE:-64}
 PRECISION=${PRECISION:-fp32}
@@ -31,6 +32,7 @@ S_CLEAN_CFG_MODE=${S_CLEAN_CFG_MODE:-null}
 # Force cfg-sweep sampling to pix_ts=1 unless explicitly overridden.
 # pix_ts maps to misc.time_dist_shift_dim = round(PIX_TS^2 * 4096).
 PIX_TS=${PIX_TS:-1}
+SAMPLE_BASE=${SAMPLE_BASE:-/home/shihaoyang/data/samples/${EXPERIMENT_NAME}/cfg_sweep_ep${EP}_pixts${PIX_TS}}
 
 dim=$("$PYTHON" -c "print(round($PIX_TS**2*4096))")
 PATCHED_CONFIG=/tmp/cfg_sweep_1536_ep${EP}_pixts${PIX_TS}.yaml
@@ -55,6 +57,7 @@ echo "--- 16x1536 layer-6 null_s_clean @ ep${EP} : cfg_scale sweep ---" >> "$RES
 echo "ckpt: $CKPT" >> "$RESULTS_FILE"
 echo "config: $CONFIG" >> "$RESULTS_FILE"
 echo "pix_ts: $PIX_TS" >> "$RESULTS_FILE"
+echo "nproc: $NPROC" >> "$RESULTS_FILE"
 printf "%-8s  %-8s  %-8s  %-8s  %s\n" "mode" "cfg" "t_min" "t_max" "FID5k" >> "$RESULTS_FILE"
 echo "------------------------------------------------" >> "$RESULTS_FILE"
 
