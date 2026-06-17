@@ -73,6 +73,10 @@ echo "sample: $NPZ_PATH" | tee -a "$RESULTS_FILE"
 echo "point: cfg=$CFG_SCALE  t=[$T_MIN,$T_MAX]  mode=$S_CLEAN_CFG_MODE  pix_ts=$PIX_TS  rae_cfg=${RAE_CFG_SCALE:-coupled}  n=$NUM_FID_SAMPLES" | tee -a "$RESULTS_FILE"
 echo "device: CPU (CUDA_VISIBLE_DEVICES forced empty for metrics)" | tee -a "$RESULTS_FILE"
 
-echo "Computing IS / FID / sFID / Precision / Recall..." | tee -a "$RESULTS_FILE"
+echo "Computing IS / FID / Precision / Recall..." | tee -a "$RESULTS_FILE"
 CUDA_VISIBLE_DEVICES="" TF_CPP_MIN_LOG_LEVEL=${TF_CPP_MIN_LOG_LEVEL:-2} \
-    "$PYTHON" evaluate.py "$REF" "$NPZ_PATH" 2>&1 | tee -a "$RESULTS_FILE"
+    "$PYTHON" src/eval/all_metrics_torch_fidelity.py \
+        --ref "$REF" \
+        --sample "$NPZ_PATH" \
+        --batch-size "${METRIC_BATCH_SIZE:-64}" \
+        --device cpu 2>&1 | tee -a "$RESULTS_FILE"
