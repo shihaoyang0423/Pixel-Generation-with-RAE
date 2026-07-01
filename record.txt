@@ -84,9 +84,11 @@ CUDA_VISIBLE_DEVICES=3 python -m eval.fid \
 # Training Launch
 # ========================
 
-bash retry_train_stage3_project.sh
+bash retry_train_stage3_project_free_layer_null_s_clean_1536.sh
 
-bash retry_train_stage3_project_free_layer.sh
+# Sampling/evaluation entrypoints for the current 16x1536 experiment:
+bash cfg_sweep.sh
+bash cfg_fid50k.sh
 
 # ========================
 # Misc / Dangerous (do NOT run casually)
