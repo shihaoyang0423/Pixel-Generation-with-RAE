@@ -182,6 +182,8 @@ def project_sample_ode_naive(
     num_steps=50,
     cfg_scale=1.0,
     cfg_interval=(0.0, 1.0),
+    rae_cfg_scale=None,        # None → couple RAE-CFG to cfg_scale (current behaviour)
+    s_clean_cfg_mode="shared",
     verbose=False,
     **kwargs
 ):
@@ -202,6 +204,19 @@ def project_sample_ode_naive(
     device = z_pix.device
     using_cfg = cfg_scale > 1.0
     y = kwargs['y']
+
+    # RAE-stream CFG (Phase 1) can be decoupled from Pixel-stream CFG (Phase 3).
+    # rae_cfg_scale=None → couple to cfg_scale (unchanged). rae_cfg_eff<=1.0 → RAE-CFG OFF.
+    rae_cfg_eff = cfg_scale if rae_cfg_scale is None else rae_cfg_scale
+    rae_cfg_on = using_cfg and (rae_cfg_eff > 1.0) and (s_clean_cfg_mode != "traj")
+    # When Pixel-CFG is on but RAE-CFG is OFF (and not traj), denoise BOTH halves
+    # conditionally so Phase 1 yields the SAME natural conditional latent for cond/uncond
+    # (no CFG sharpening, no traj-style image divergence).
+    if using_cfg and not rae_cfg_on and s_clean_cfg_mode != "traj":
+        _Bh = B_full // 2
+        y_phase1 = torch.cat([y[:_Bh], y[:_Bh]], dim=0)
+    else:
+        y_phase1 = y
 
     def get_t(s, shift):
         return shift * s / (1 + (shift - 1) * s)
@@ -252,12 +267,16 @@ def project_sample_ode_naive(
         t_rae_batch = t_rae_scalar.repeat(B_full)
         dt_ds_rae = get_dt_ds(s_curr, transport_rae.time_dist_shift)
 
-        if using_cfg:
+        if rae_cfg_on:
             model_out_rae = model.forward_rae_with_cfg(
-                x_rae, t_rae_batch, y, cfg_scale=cfg_scale, cfg_interval=cfg_interval
+                x_rae, t_rae_batch, y_phase1, cfg_scale=rae_cfg_eff, cfg_interval=cfg_interval
             )
         else:
-            model_out_rae = model.forward_rae(x_rae, t_rae_batch, y)
+            # RAE-CFG OFF. Three sub-cases share this plain forward:
+            #  - traj (方案1.A): y_phase1=[y_class, y_null] → two divergent trajectories
+            #  - rae-cfg-off (non-traj): y_phase1=[y_class, y_class] → same conditional latent
+            #  - no Pixel-CFG at all: y_phase1=y (conditional)
+            model_out_rae = model.forward_rae(x_rae, t_rae_batch, y_phase1)
 
         drift_rae_dt = compute_ode_drift(transport_rae, x_rae, t_rae_batch, model_out_rae)
         x_rae = x_rae + drift_rae_dt * (dt_ds_rae * ds)
@@ -269,18 +288,38 @@ def project_sample_ode_naive(
 
     # -----------------------------------------------------------------------
     # Phase 2: Extract clean conditioning features from denoised RAE
-    # With CFG, extract s_clean separately for cond/uncond halves so injected
-    # pixel layers see y_null features on the uncond batch slot.
-    # x_rae_clean[:B] and x_rae_clean[B:] are equal after Phase 1 CFG guidance.
+    # With CFG, choose how the uncond batch slot's s_clean is built:
+    #   shared — reuse cond's class-conditioned s_clean
+    #   split  — same (CFG-guided) latent, but extract with y_null
+    #   null   — learned null s_clean token
+    #   traj   — 方案1.A: extract from the SEPARATE unconditional RAE trajectory
+    # For shared/split/null, Phase 1 CFG-blends so x_rae_clean[:B] == x_rae_clean[B:].
+    # For traj, Phase 1 is NOT blended, so the two halves are DIFFERENT latents.
     # -----------------------------------------------------------------------
     if using_cfg:
         B = B_full // 2
         x_rae_half = x_rae_clean[:B]
         y_cond = y[:B]
-        y_uncond = y[B:]
         s_clean_cond = model.extract_clean_s(x_rae_half, y_cond)       # [B, L, C_enc]
-        s_clean_uncond = model.extract_clean_s(x_rae_half, y_uncond)   # [B, L, C_enc]
-        s_clean = torch.cat([s_clean_cond, s_clean_uncond], dim=0)     # [2B, L, C_enc]
+        if s_clean_cfg_mode == "shared":
+            s_clean = torch.cat([s_clean_cond, s_clean_cond], dim=0)   # [2B, L, C_enc]
+        elif s_clean_cfg_mode == "split":
+            y_uncond = y[B:]
+            s_clean_uncond = model.extract_clean_s(x_rae_half, y_uncond)  # [B, L, C_enc]
+            s_clean = torch.cat([s_clean_cond, s_clean_uncond], dim=0)    # [2B, L, C_enc]
+        elif s_clean_cfg_mode == "null":
+            s_clean_uncond = model.get_null_s_clean(B, device=s_clean_cond.device, dtype=s_clean_cond.dtype)
+            s_clean = torch.cat([s_clean_cond, s_clean_uncond], dim=0)    # [2B, L, C_enc]
+        elif s_clean_cfg_mode == "traj":
+            # 方案1.A: uncond s_clean comes from the unconditional RAE trajectory
+            # (x_rae_clean[B:], evolved under y_null without CFG blend), not the
+            # conditional half. Both latent AND label are unconditional.
+            y_uncond = y[B:]
+            x_rae_uncond = x_rae_clean[B:]
+            s_clean_uncond = model.extract_clean_s(x_rae_uncond, y_uncond)  # [B, L, C_enc]
+            s_clean = torch.cat([s_clean_cond, s_clean_uncond], dim=0)      # [2B, L, C_enc]
+        else:
+            raise ValueError(f"Unknown s_clean_cfg_mode: {s_clean_cfg_mode!r}")
     else:
         s_clean = model.extract_clean_s(x_rae_clean, y)                  # [B, L, C_enc]
 
@@ -349,6 +388,21 @@ def load_checkpoint(path_str, model, ema_model, optimizer, scheduler):
     if scheduler is not None and checkpoint.get("scheduler") is not None:
         scheduler.load_state_dict(checkpoint["scheduler"])
     return checkpoint.get("epoch", 0), checkpoint.get("step", 0)
+
+
+def load_init_checkpoint(path_str, model, ema_model, logger):
+    checkpoint = torch.load(path_str, map_location="cpu")
+    if isinstance(checkpoint, dict):
+        state_dict = checkpoint.get("ema", checkpoint.get("model", checkpoint))
+    else:
+        state_dict = checkpoint
+    msg_model = model.module.load_state_dict(state_dict, strict=False)
+    msg_ema = ema_model.load_state_dict(state_dict, strict=False)
+    logger.info(f"Initialised model/EMA from {path_str}")
+    logger.info(f"Init model missing keys: {msg_model.missing_keys}")
+    logger.info(f"Init model unexpected keys: {msg_model.unexpected_keys}")
+    logger.info(f"Init EMA missing keys: {msg_ema.missing_keys}")
+    logger.info(f"Init EMA unexpected keys: {msg_ema.unexpected_keys}")
 
 
 # -----------------------------------------------------------------------------
@@ -497,6 +551,16 @@ def main():
     t_min = float(guidance_value("t_min", 0.0))
     t_max = float(guidance_value("t_max", 1.0))
 
+    # How CFG builds the uncond s_clean for in-training eval samples.
+    # Default tracks the model: a learned null s_clean token uses "null",
+    # otherwise reuse the class-conditioned s_clean ("shared").
+    _model_uses_null_s = bool(
+        to_dict(model_config).get("params", {}).get("use_s_clean_null_token", False)
+    )
+    s_clean_cfg_mode = guidance_value(
+        "s_clean_cfg_mode", "null" if _model_uses_null_s else "shared"
+    )
+
     experiment_dir, checkpoint_dir, logger = configure_experiment_dirs(args, rank)
 
     #### Model init
@@ -549,11 +613,19 @@ def main():
         logger.info(f"Eval dataset: {eval_data} ({len(eval_dataset)} images)")
 
     loader_batches = len(loader)
-    if loader_batches % grad_accum_steps != 0:
-        raise ValueError("loader batches must be divisible by grad_accum_steps.")
     steps_per_epoch = loader_batches // grad_accum_steps
     if steps_per_epoch <= 0:
         raise ValueError("grad_accum results in zero optimizer steps per epoch.")
+    # Drop a trailing partial accumulation group (if any) so every optimizer step
+    # sees exactly grad_accum_steps micro-batches. The loader reshuffles each epoch,
+    # so the few dropped samples differ every epoch and the effect is negligible.
+    usable_micro_batches = steps_per_epoch * grad_accum_steps
+    if loader_batches != usable_micro_batches and rank == 0:
+        logger.info(
+            f"[grad_accum] {loader_batches} micro-batches/epoch not divisible by "
+            f"grad_accum_steps={grad_accum_steps}; dropping last "
+            f"{loader_batches - usable_micro_batches} micro-batch(es) per epoch."
+        )
 
     if training_cfg.get("scheduler"):
         scheduler, sched_msg = build_scheduler(optimizer, steps_per_epoch, training_cfg)
@@ -636,6 +708,11 @@ def main():
         else:
             raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
     else:
+        if args.ckpt is not None:
+            init_ckpt = Path(args.ckpt)
+            if not init_ckpt.is_file():
+                raise FileNotFoundError(f"Initial checkpoint not found: {init_ckpt}")
+            load_init_checkpoint(str(init_ckpt), ddp_model, ema_model, logger)
         if rank == 0:
             save_worktree(experiment_dir, full_cfg)
             logger.info(f"Saved training worktree and config to {experiment_dir}.")
@@ -687,6 +764,8 @@ def main():
                 sys.exit(3)
 
         for step, (images, labels) in enumerate(loader):
+            if step >= usable_micro_batches:
+                break  # drop trailing partial accumulation group
             images = images.to(device)
             labels = labels.to(device)
             # Skip RAE encoding entirely in pixel_only mode
@@ -700,7 +779,6 @@ def main():
             # Pixel input: [0, 1] range (no 2x-1 normalisation — project baseline)
             x_pix = images
 
-            optimizer.zero_grad(set_to_none=True)
             model_kwargs = dict(y=labels)
 
             with autocast(**autocast_kwargs):
@@ -722,11 +800,14 @@ def main():
                 scaler.scale(loss / grad_accum_steps).backward()
             else:
                 (loss / grad_accum_steps).backward()
-            if clip_grad:
-                if scaler:
-                    scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(ddp_model.parameters(), clip_grad)
-            if global_step % grad_accum_steps == 0:
+            # Gradients accumulate in-place across the group; step + clip + zero_grad
+            # only once the group of grad_accum_steps micro-batches is complete.
+            # (optimizer.zero_grad once before the epoch loop seeds the first group.)
+            if (step + 1) % grad_accum_steps == 0:
+                if clip_grad:
+                    if scaler:
+                        scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(ddp_model.parameters(), clip_grad)
                 if scaler:
                     scaler.step(optimizer)
                     scaler.update()
@@ -735,6 +816,7 @@ def main():
                 if scheduler is not None:
                     scheduler.step()
                 update_ema(ema_model, ddp_model.module, decay=ema_decay)
+                optimizer.zero_grad(set_to_none=True)
             running_loss += loss.item()
             running_loss_pix += loss_pix.mean().item()
             running_loss_rae_w += (rae_loss_weight * loss_rae).mean().item()
@@ -788,6 +870,7 @@ def main():
                         num_steps=sampler_params_pix.get("num_steps", 50),
                         cfg_scale=guidance_scale,
                         cfg_interval=(t_min, t_max),
+                        s_clean_cfg_mode=s_clean_cfg_mode,
                         y=vis_y,
                     )
 

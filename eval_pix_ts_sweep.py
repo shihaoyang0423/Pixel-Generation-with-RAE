@@ -38,7 +38,7 @@ PIXEL_TIME_SHIFTS = [0.2, 0.3, 0.5, 0.8, 1.0, 1.5, 2.0, 2.5, 3.0]  # [0.05, 0.1,
 
 CKPT = (
     "/home/shihaoyang/data/ckpts/PixDDTv2/"
-    "PixDDT_small_v2_project_free_layer_1_3_5_7_false_wo_lora_w_y_embed_adaln_zero_12_768/checkpoints/ep-0000100.pt"
+    "PixDDT_project_free_layer_1_3_5_7_false_wo_lora_w_y_embed_adaln_zero_12_1152_DiTDHXL_null_s_clean/checkpoints/ep-0000050.pt"
 )
 
 # Base YAML (relative to RAE/ root) — misc.time_dist_shift_dim will be patched per run

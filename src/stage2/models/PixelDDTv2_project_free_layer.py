@@ -170,6 +170,7 @@ class PixelDDT(nn.Module):
         direct_rae_in_channels: int = 768,   # channel dim of x1_rae (DINOv2-base = 768)
         use_y_embedder: bool = False,        # True → non-injected layers use t+y; False → t only
         use_adaln_zero: bool = False,        # True → zero-init adaLN_modulation[-1] for all blocks (AdaLN-Zero)
+        use_s_clean_null_token: bool = False, # True → sync y dropout with learned null s_clean during training
     ):
         super().__init__()
         self.in_channels = in_channels
@@ -215,11 +216,13 @@ class PixelDDT(nn.Module):
         self.use_direct_rae_injection = use_direct_rae_injection
         self.use_y_embedder = use_y_embedder
         self.use_adaln_zero = use_adaln_zero
+        self.use_s_clean_null_token = use_s_clean_null_token
         print(f"[PixelDDT free_layer] rae_inject_layers={rae_inject_layers}, "
               f"rae_inject_final_layer={rae_inject_final_layer}, "
               f"use_direct_rae_injection={use_direct_rae_injection}, "
               f"use_y_embedder={use_y_embedder}, "
               f"use_adaln_zero={use_adaln_zero}, "
+              f"use_s_clean_null_token={use_s_clean_null_token}, "
               f"pixel_only={self._inject_set is not None and len(self._inject_set) == 0 and not rae_inject_final_layer}")
 
         if stage2_config is None:
@@ -234,6 +237,10 @@ class PixelDDT(nn.Module):
 
         self.t_embedder = GaussianFourierEmbedding(self.ddt.encoder_hidden_size)
         self.y_embedder = LabelEmbedder(num_classes, self.ddt.encoder_hidden_size, class_dropout_prob)
+        if use_s_clean_null_token:
+            self.null_s_clean = nn.Parameter(torch.zeros(
+                1, self.ddt.s_embedder.num_patches, self.ddt.encoder_hidden_size
+            ))
 
         # Multi-stage blocks: one LightningDDTBlock per (stage, layer)
         all_blocks = []
@@ -386,6 +393,26 @@ class PixelDDT(nn.Module):
         if not self.training or self.y_embedder.dropout_prob <= 0:
             return None
         return (torch.rand(y.shape[0], device=y.device) < self.y_embedder.dropout_prob).long()
+
+    def get_null_s_clean(self, batch_size, device=None, dtype=None):
+        if not hasattr(self, "null_s_clean"):
+            raise RuntimeError("s_clean_cfg_mode='null' requires use_s_clean_null_token=True in the model config.")
+        null_s = self.null_s_clean
+        if device is not None or dtype is not None:
+            null_s = null_s.to(device=device or null_s.device, dtype=dtype or null_s.dtype)
+        return null_s.expand(batch_size, -1, -1)
+
+    def _apply_s_clean_null_token(self, s_clean, force_drop_ids):
+        if not self.use_s_clean_null_token or force_drop_ids is None:
+            return s_clean
+        drop_mask = (force_drop_ids == 1).view(-1, 1, 1)
+        null_s = self.get_null_s_clean(s_clean.shape[0], device=s_clean.device, dtype=s_clean.dtype)
+        # Always route null_s through torch.where — even when no sample is dropped in
+        # this micro-batch (drop_mask all False, output == s_clean unchanged). This keeps
+        # null_s_clean in the autograd graph every iteration so it always receives a
+        # gradient; otherwise DDP trips on "parameter did not receive grad" the moment a
+        # micro-batch happens to have zero dropouts (no find_unused_parameters needed).
+        return torch.where(drop_mask, null_s, s_clean)
 
     def _run_ddt_encoder(self, x_rae, t_rae, y, force_drop_ids=None):
         """
@@ -589,6 +616,7 @@ class PixelDDT(nn.Module):
 
         # 1. Extract clean conditioning features from x1_rae at t=0
         s_clean = self._extract_clean_s(x1_rae, y, force_drop_ids=force_drop_ids)
+        s_clean = self._apply_s_clean_null_token(s_clean, force_drop_ids)
 
         # 2. RAE denoising branch — full DDT forward with noisy x_rae (for RAE loss)
         ddt_ctx = contextlib.nullcontext() if self.use_lora else torch.no_grad()
