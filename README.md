@@ -582,5 +582,3 @@ src/
     ├── fid.py
     └── all_metrics_torch_fidelity.py
 ```
-
-更细的依赖、路径、输出和清理记录见 [plans/cleanup-note.md](plans/cleanup-note.md)。
