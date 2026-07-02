@@ -161,6 +161,7 @@ class PixelDDT(nn.Module):
         wo_shift=False,
         stage2_config: dict = None,
         stage2_ckpt: str = None,
+        load_stage2_ckpt: bool = True,
         use_lora: bool = False,
         lora_rank: int = 4,
         mask_channel: str = False,
@@ -228,7 +229,10 @@ class PixelDDT(nn.Module):
         if stage2_config is None:
             raise ValueError("stage2_config must be provided for PixelDDT")
 
-        print(f"Loading pretrained DDT model from {stage2_ckpt}...")
+        if load_stage2_ckpt:
+            print(f"Loading pretrained DDT model from {stage2_ckpt}...")
+        else:
+            print("Skipping pretrained DDT load; a full model checkpoint must be loaded next.")
         self.ddt = DiTwDDTHead(**stage2_config)
 
         self.x_embedder = PatchEmbed(input_size, patch_size, in_channels, hidden_sizes[0], bias=True)
@@ -286,7 +290,7 @@ class PixelDDT(nn.Module):
 
         self.initialize_weights()
 
-        if stage2_ckpt:
+        if load_stage2_ckpt and stage2_ckpt:
             state_dict = torch.load(stage2_ckpt, map_location='cpu')
             if 'ema' in state_dict:
                 state_dict = state_dict['ema']
@@ -302,7 +306,7 @@ class PixelDDT(nn.Module):
             print(f"DDT load msg: {msg}")
             if msg.missing_keys:
                 print(f"WARNING: DDT has missing keys: {msg.missing_keys}")
-        else:
+        elif load_stage2_ckpt:
             raise ValueError("stage2_ckpt must be provided to load pretrained DDT weights.")
 
         for p in self.ddt.parameters():

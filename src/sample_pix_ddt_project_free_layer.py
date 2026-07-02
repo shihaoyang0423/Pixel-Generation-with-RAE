@@ -25,6 +25,7 @@ Usage (from RAE/ root):
         --per-proc-batch-size 64 \\
         --precision fp32 \\
         --label-sampling equal \\
+        --class-ids 84 291 292 340 388 579 817 907 953 985 \\
         --naive
 """
 
@@ -79,28 +80,46 @@ def create_npz_from_sample_folder(sample_dir: str, num: int) -> str:
 def build_label_sampler(
     sampling_mode: str,
     num_classes: int,
+    class_ids: list[int] | None,
     num_fid_samples: int,
     total_samples: int,
-    samples_needed_this_device: int,
     batch_size: int,
     device: torch.device,
     rank: int,
+    world_size: int,
     iterations: int,
     seed: int,
 ) -> Callable[[int], torch.Tensor]:
+    if class_ids is None:
+        class_pool = torch.arange(num_classes, dtype=torch.long)
+    else:
+        if not class_ids:
+            raise ValueError("--class-ids must contain at least one class ID.")
+        if len(set(class_ids)) != len(class_ids):
+            raise ValueError(f"--class-ids contains duplicates: {class_ids}")
+        invalid_ids = [class_id for class_id in class_ids if not 0 <= class_id < num_classes]
+        if invalid_ids:
+            raise ValueError(
+                f"Class IDs must be in [0, {num_classes - 1}], got: {invalid_ids}"
+            )
+        class_pool = torch.tensor(class_ids, dtype=torch.long)
+
     if sampling_mode == "random":
         def random_sampler(_step_idx: int) -> torch.Tensor:
-            return torch.randint(0, num_classes, (batch_size,), device=device)
+            indices = torch.randint(0, class_pool.numel(), (batch_size,), device=device)
+            return class_pool.to(device)[indices]
         return random_sampler
 
     if sampling_mode == "equal":
-        if num_fid_samples % num_classes != 0:
+        selected_class_count = class_pool.numel()
+        if num_fid_samples % selected_class_count != 0:
             raise ValueError(
                 f"Equal label sampling requires num_fid_samples ({num_fid_samples}) "
-                f"to be divisible by num_classes ({num_classes})."
+                f"to be divisible by the number of selected classes "
+                f"({selected_class_count})."
             )
-        labels_per_class = num_fid_samples // num_classes
-        base_pool = torch.arange(num_classes, dtype=torch.long).repeat_interleave(labels_per_class)
+        labels_per_class = num_fid_samples // selected_class_count
+        base_pool = class_pool.repeat_interleave(labels_per_class)
 
         generator = torch.Generator()
         generator.manual_seed(seed)
@@ -108,14 +127,27 @@ def build_label_sampler(
         base_pool = base_pool[perm]
 
         if total_samples > num_fid_samples:
-            tail = torch.randint(0, num_classes, (total_samples - num_fid_samples,), generator=generator)
+            tail_indices = torch.randint(
+                0,
+                selected_class_count,
+                (total_samples - num_fid_samples,),
+                generator=generator,
+            )
+            tail = class_pool[tail_indices]
             global_pool = torch.cat([base_pool, tail], dim=0)
         else:
             global_pool = base_pool
 
-        start = rank * samples_needed_this_device
-        device_pool = global_pool[start: start + samples_needed_this_device]
-        device_pool = device_pool.view(iterations, batch_size)
+        expected_total = iterations * batch_size * world_size
+        if global_pool.numel() != expected_total:
+            raise ValueError(
+                f"Label pool has {global_pool.numel()} entries, expected {expected_total}."
+            )
+
+        # PNG indices are assigned in (step, local_idx, rank) order. Slice the
+        # label pool in the same order so truncating a rounded-up tail preserves
+        # exact class counts in the first num_fid_samples images.
+        device_pool = global_pool.view(iterations, batch_size, world_size)[:, :, rank]
 
         def equal_sampler(step_idx: int) -> torch.Tensor:
             return device_pool[step_idx].to(device)
@@ -198,6 +230,11 @@ def main(args: argparse.Namespace) -> None:
     null_label  = int(misc_pix.get("null_label", num_classes))
 
     # ---- Build PixelDDT model (project version) ----
+    # A training checkpoint contains the complete PixelDDT state, including the
+    # frozen DDT. Avoid requiring the YAML's original stage2_ckpt path when a
+    # full checkpoint will immediately replace every parameter below.
+    if args.ckpt is not None:
+        model_config["params"]["load_stage2_ckpt"] = False
     model: Stage2ModelProtocol = instantiate_from_config(model_config).to(device)
 
     if args.ckpt is not None:
@@ -294,12 +331,13 @@ def main(args: argparse.Namespace) -> None:
     label_sampler = build_label_sampler(
         sampling_mode=args.label_sampling,
         num_classes=num_classes,
+        class_ids=args.class_ids,
         num_fid_samples=args.num_fid_samples,
         total_samples=total_samples,
-        samples_needed_this_device=samples_per_gpu,
         batch_size=n,
         device=device,
         rank=rank,
+        world_size=world_size,
         iterations=iterations,
         seed=args.global_seed,
     )
@@ -390,6 +428,13 @@ if __name__ == "__main__":
     parser.add_argument("--global-seed", type=int, default=0)
     parser.add_argument("--precision", type=str, choices=["fp32", "bf16"], default="fp32")
     parser.add_argument("--label-sampling", type=str, choices=["random", "equal"], default="equal")
+    parser.add_argument(
+        "--class-ids",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Restrict label sampling to these ImageNet class IDs (default: all classes).",
+    )
     parser.add_argument("--cfg-scale", type=float, default=None,
                         help="Override CFG guidance scale from config.")
     parser.add_argument("--t-min", type=float, default=None)
