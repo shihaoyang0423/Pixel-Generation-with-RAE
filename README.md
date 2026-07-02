@@ -278,11 +278,6 @@ conda activate rae
        └── ...
    ```
 
-当前启动脚本仍硬编码：
-
-```text
-/data/shihaoyang/data/imagenet/256/train
-```
 
 正式发布前应改为命令行参数或环境变量。
 
@@ -320,16 +315,6 @@ export HF_ENDPOINT=https://hf-mirror.com
 | ViTXL_n08 解码器 | 训练期间可视化 RAE 潜在表征 | `stage_1.params.pretrained_decoder_path` |
 | DiT<sup>DH</sup>-XL `stage2_model.pt` | 冻结的语义去噪器和编码器 | `stage_2.params.stage2_ckpt` |
 | ImageNet 参考 NPZ | FID 参考统计量 | `eval.reference_npz_path` / `REF` |
-
-当前 YAML 中的原服务器布局：
-
-```text
-/data/shihaoyang/pretrained/
-├── encoders/dinov2-with-registers-base/
-├── decoders/dinov2/wReg_base/ViTXL_n08/model.pt
-├── stats/dinov2/wReg_base/imagenet1k/stat.pt
-└── DiTs/Dinov2/wReg_base/ImageNet256/DiTDH-XL/stage2_model.pt
-```
 
 ### 准备像素头检查点
 
@@ -415,14 +400,6 @@ stage_2:
 retry_train_stage3_project_free_layer_null_s_clean_1536.sh
 ```
 
-原服务器目录结构下：
-
-```bash
-cd /home/shihaoyang/RAE
-
-CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
-bash retry_train_stage3_project_free_layer_null_s_clean_1536.sh
-```
 
 可用环境变量：
 
@@ -461,16 +438,15 @@ PixDDT_project_free_layer_6_16_1536_DiTDHXL_null_s_clean
 ### 输出目录
 
 ```text
-/home/shihaoyang/data/ckpts/PixDDTv2/
-└── PixDDT_project_free_layer_6_16_1536_DiTDHXL_null_s_clean/
-    ├── config.yaml
-    ├── src/
-    ├── log.txt
-    ├── fid_record.txt
-    └── checkpoints/
-        ├── ep-0000010.pt
-        ├── ep-0000020.pt
-        └── ep-0000050.pt
+PixDDT_project_free_layer_6_16_1536_DiTDHXL_null_s_clean/
+├── config.yaml
+├── src/
+├── log.txt
+├── fid_record.txt
+└── checkpoints/
+    ├── ep-0000010.pt
+    ├── ep-0000020.pt
+    └── ep-0000050.pt
 ```
 
 检查点包含模型、EMA、优化器、学习率调度器、训练周期和训练步数。
